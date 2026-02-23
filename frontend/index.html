@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <title>Wiki Worldbuilding</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <h1>Wiki Worldbuilding</h1>
+
+    <div>
+        <label for="filtro-tipo">Filtrar por tipo:</label>
+        <select id="filtro-tipo">
+            <option value="">Todos</option>
+            <option value="personagem">Personagem</option>
+            <option value="item">Item</option>
+            <option value="local">Local</option>
+        </select>
+
+        <label for="filtro-tag">Filtrar por tag:</label>
+        <input type="text" id="filtro-tag" placeholder="Digite uma tag">
+        <button id="btn-filtrar">Filtrar</button>
+    </div>
+    <button id="btn-nova-pagina">Criar nova página</button>
+
+<div id="form-nova-pagina" style="display:none; margin-top:10px;">
+    <label>Tipo: 
+        <select id="tipo">
+            <option value="personagem">Personagem</option>
+            <option value="item">Item</option>
+            <option value="organização">Organização</option>
+            <option value="criatura">Criatura</option>
+        </select>
+    </label><br>
+    <label>Título: <input type="text" id="titulo"></label><br>
+    <label>Autor: <input type="text" id="autor"></label><br>
+    <label>Tags (separadas por vírgula): <input type="text" id="tags"></label><br>
+    <button id="btn-salvar">Salvar</button>
+</div>
+
+    <ul id="lista-paginas">
+        <!-- As páginas vão aparecer aqui -->
+    </ul>
+
+    <script src="script.js"></script>
+</body>
+</html>
