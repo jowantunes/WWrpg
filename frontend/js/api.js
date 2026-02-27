@@ -5,10 +5,16 @@ async function jsonFetch(url, options = {}) {
   });
 
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { erro: text };
+  }
 
   if (!res.ok) {
-    const msg = (data && (data.erro || data.error)) || `Erro ${res.status}`;
+    const msg = (data && (data.detalhe || data.erro || data.error)) || `Erro ${res.status}`;
     throw new Error(msg);
   }
   return data;

@@ -55,14 +55,15 @@ export async function renderEntity(root, id) {
     const editando = btnEditar.textContent === "Salvar";
 
     if (!editando) {
-      campos.forEach(c => c.removeAttribute("readonly"));
+      setEditMode(campos, true);
       btnEditar.textContent = "Salvar";
       return;
-    }
+}
 
     // Salvar
     const payload = {};
     payload.titulo = root.querySelector("#campo-titulo").value;
+    payload.id = pagina.id;
     payload.autor = root.querySelector("#campo-autor").value;
 
     const tags = root.querySelector("#campo-tags").value
@@ -72,15 +73,33 @@ export async function renderEntity(root, id) {
 
     payload.tags = tags;
 
-    if (pagina.tipo === "personagem") {
-      const idadeVal = root.querySelector("#campo-idade").value;
-      payload.idade = idadeVal === "" ? null : Number(idadeVal);
-      payload.classe = root.querySelector("#campo-classe").value.trim();
+    const entidade = getEntidade(pagina);
+    const fields = SCHEMAS[entidade] || [];
+
+    for (const f of fields) {
+      const el = root.querySelector(`#campo-${f.key}`);
+      if (!el) continue;
+
+      let v = el.value;
+
+      if (v && typeof v === "object") v = "";
+      if (typeof v === "string") v = v.trim();
+
+      if (f.type === "number") {
+        v = v === "" ? null : Number(v);
+      }
+
+      // compatibilidade personagem (classe → subtipo)
+      if (entidade === "personagem" && f.key === "tipo") {
+        payload.classe = String(v || "").trim();
+      } else {
+        payload[f.key] = typeof v === "string" ? v.trim() : v;
+      }
     }
 
     try {
       await api.editarPagina(id, payload);
-      campos.forEach(c => c.setAttribute("readonly", true));
+      setEditMode(campos, false);
       btnEditar.textContent = "Editar";
       alert("Salvo!");
     } catch (e) {
@@ -99,22 +118,101 @@ export async function renderEntity(root, id) {
     }
   });
 }
-
+const SCHEMAS = {
+  personagem: [
+    { key: "idade", label: "Idade", type: "number" },
+    { key: "tipo", label: "Classe", type: "text", alias: "classe" }, // suporta pagina.classe antigo
+    { key: "genero", label: "Gênero", type: "text" },
+    { key: "status_vida", label: "Status", type: "select", options: ["vivo","morto","desconhecido"] },
+    { key: "aparencia", label: "Aparência", type: "textarea" },
+    { key: "descricao", label: "Descrição", type: "textarea" },
+    { key: "aniversario", label: "Aniversário", type: "text" },
+  ],
+  local: [
+    { key: "tipo", label: "Tipo", type: "text" },
+    { key: "descricao", label: "Descrição", type: "textarea" },
+    { key: "status_local", label: "Status", type: "select", options: ["ativo","destruido","abandonado","desconhecido"] },
+  ],
+  organizacao: [
+    { key: "tipo", label: "Tipo", type: "text" },
+    { key: "descricao", label: "Descrição", type: "textarea" },
+    { key: "status_org", label: "Status", type: "select", options: ["ativa","extinta","desconhecida"] },
+  ],
+  criatura: [
+    { key: "tipo", label: "Tipo", type: "text" },
+    { key: "elemento", label: "Elemento", type: "text" },
+    { key: "descricao", label: "Descrição", type: "textarea" },
+    { key: "status", label: "Status", type: "select", options: ["viva","morta","extinta","desconhecida"] },
+  ],
+  evento: [
+    { key: "tipo", label: "Tipo", type: "text" },
+    { key: "descricao", label: "Descrição", type: "textarea" },
+    { key: "data_inicio", label: "Data início", type: "text" },
+    { key: "data_fim", label: "Data fim", type: "text" },
+  ],
+  item: [
+    { key: "tipo", label: "Tipo", type: "text" },
+    { key: "descricao", label: "Descrição", type: "textarea" },
+  ],
+};
 function renderCamposEspecificos(pagina) {
-  if (pagina.tipo === "personagem") {
+  const entidade = getEntidade(pagina);
+  const fields = SCHEMAS[entidade] || [];
+  if (!fields.length) return "";
+
+  return fields.map(f => {
+    const id = `campo-${f.key}`;
+    const rawVal =
+      pagina[f.key] ??
+      (f.alias ? pagina[f.alias] : undefined) ??
+      "";
+    const val = (f.type === "textarea") ? escapeHtml(rawVal) : escapeHtml(rawVal);
+
+    if (f.type === "select") {
+      const opts = (f.options || []).map(o => {
+        const selected = String(rawVal).toLowerCase() === o ? "selected" : "";
+        return `<option value="${o}" ${selected}>${o}</option>`;
+      }).join("");
+      return `
+        <label>${f.label}<br/>
+          <select id="${id}" class="campo-editavel" disabled>
+            ${opts}
+          </select>
+        </label>
+      `;
+    }
+
+    if (f.type === "textarea") {
+      return `
+        <label>${f.label}<br/>
+          <textarea id="${id}" class="campo-editavel" readonly>${val}</textarea>
+        </label>
+      `;
+    }
+
+    const inputType = f.type || "text";
     return `
-      <label>Idade<br/>
-        <input type="number" id="campo-idade" class="campo-editavel" readonly value="${pagina.idade ?? ""}" />
-      </label>
-      
-      <label>Classe<br/>
-        <input id="campo-classe" class="campo-editavel" readonly value="${escapeHtml(pagina.classe || "")}" />
+      <label>${f.label}<br/>
+        <input id="${id}" type="${inputType}" class="campo-editavel" readonly value="${val}" />
       </label>
     `;
-  }
+  }).join("");
+}
 
-  // organizacao ainda não tem campos
-  return "";
+function getEntidade(pagina) {
+  return (pagina.entidade || pagina.tipo || "").toLowerCase().trim();
+}
+
+function setEditMode(campos, enabled) {
+  campos.forEach(c => {
+    if (c.tagName === "SELECT") {
+      if (enabled) c.removeAttribute("disabled");
+      else c.setAttribute("disabled", true);
+    } else {
+      if (enabled) c.removeAttribute("readonly");
+      else c.setAttribute("readonly", true);
+    }
+  });
 }
 
 async function renderRelacionamentos(root, pagina) {
@@ -122,7 +220,7 @@ async function renderRelacionamentos(root, pagina) {
   if (!box) return;
 
 // ORGANIZAÇÃO -> MEMBROS (com adicionar/remover)
-if (pagina.tipo === "organizacao") {
+if (getEntidade(pagina) === "organizacao") {
   box.innerHTML = `<h3>Membros</h3><p>Carregando...</p>`;
 
   let membros = [];
@@ -185,6 +283,7 @@ if (pagina.tipo === "organizacao") {
   });
 }
 }
+
 function escapeHtml(str) {
   return String(str)
     .replaceAll("&", "&amp;")
