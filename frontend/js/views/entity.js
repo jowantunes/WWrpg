@@ -1,5 +1,6 @@
 import { api } from "../api.js";
 import { navigate } from "../app.js";
+import { SCHEMAS } from "../schemas.js";
 
 export async function renderEntity(root, id) {
   root.innerHTML = `<p>Carregando entidade #${id}...</p>`;
@@ -17,7 +18,7 @@ export async function renderEntity(root, id) {
   // Campos básicos + idade (se vier do backend)
   root.innerHTML = `
     <button id="voltar">← Voltar</button>
-    <h2 style="margin-top:12px;"> ${escapeHtml(pagina.titulo || "")} </h2>
+    <h2 style="margin-top:12px;">${escapeHtml(pagina.titulo || "")}</h2>
 
     <div style="display:grid; gap:10px; max-width:520px;">
       <label>Título<br/>
@@ -32,10 +33,10 @@ export async function renderEntity(root, id) {
         <input id="campo-tags" class="campo-editavel" readonly value="${escapeHtml(tagsText)}" />
       </label>
 
-
       ${renderCamposEspecificos(pagina)}
+    </div>
 
-      <div id="relacionamentos" style="margin-top:16px;"></div>
+    <div id="relacionamentos" style="margin-top:16px;"></div>
 
     <div style="margin-top:12px; display:flex; gap:8px;">
       <button id="btn-editar">Editar</button>
@@ -118,43 +119,6 @@ export async function renderEntity(root, id) {
     }
   });
 }
-const SCHEMAS = {
-  personagem: [
-    { key: "idade", label: "Idade", type: "number" },
-    { key: "tipo", label: "Classe", type: "text", alias: "classe" }, // suporta pagina.classe antigo
-    { key: "genero", label: "Gênero", type: "text" },
-    { key: "status_vida", label: "Status", type: "select", options: ["vivo","morto","desconhecido"] },
-    { key: "aparencia", label: "Aparência", type: "textarea" },
-    { key: "descricao", label: "Descrição", type: "textarea" },
-    { key: "aniversario", label: "Aniversário", type: "text" },
-  ],
-  local: [
-    { key: "tipo", label: "Tipo", type: "text" },
-    { key: "descricao", label: "Descrição", type: "textarea" },
-    { key: "status_local", label: "Status", type: "select", options: ["ativo","destruido","abandonado","desconhecido"] },
-  ],
-  organizacao: [
-    { key: "tipo", label: "Tipo", type: "text" },
-    { key: "descricao", label: "Descrição", type: "textarea" },
-    { key: "status_org", label: "Status", type: "select", options: ["ativa","extinta","desconhecida"] },
-  ],
-  criatura: [
-    { key: "tipo", label: "Tipo", type: "text" },
-    { key: "elemento", label: "Elemento", type: "text" },
-    { key: "descricao", label: "Descrição", type: "textarea" },
-    { key: "status", label: "Status", type: "select", options: ["viva","morta","extinta","desconhecida"] },
-  ],
-  evento: [
-    { key: "tipo", label: "Tipo", type: "text" },
-    { key: "descricao", label: "Descrição", type: "textarea" },
-    { key: "data_inicio", label: "Data início", type: "text" },
-    { key: "data_fim", label: "Data fim", type: "text" },
-  ],
-  item: [
-    { key: "tipo", label: "Tipo", type: "text" },
-    { key: "descricao", label: "Descrição", type: "textarea" },
-  ],
-};
 function renderCamposEspecificos(pagina) {
   const entidade = getEntidade(pagina);
   const fields = SCHEMAS[entidade] || [];
@@ -215,28 +179,140 @@ function setEditMode(campos, enabled) {
   });
 }
 
+// relations_ui.js
+
 async function renderRelacionamentos(root, pagina) {
   const box = root.querySelector("#relacionamentos");
   if (!box) return;
 
-// ORGANIZAÇÃO -> MEMBROS (com adicionar/remover)
-if (getEntidade(pagina) === "organizacao") {
-  box.innerHTML = `<h3>Membros</h3><p>Carregando...</p>`;
+  box.innerHTML = `<h3>Relacionamentos</h3><p>Carregando...</p>`;
 
+  // 1) Carrega TODAS as relações do backend (rota nova)
+  let rel;
+  try {
+    rel = await api.getRelations(pagina.id); // GET /api/relations/<page_id>
+  } catch (e) {
+    rel = null;
+  }
+
+  // 2) Render genérico de relações (qualquer entidade)
+  const htmlGenerico = renderRelacoesGenericas(rel);
+
+  // 3) Render específico (UI rica) pros dois casos que tu já tinha
+  const entidade = getEntidade(pagina);
+
+  if (entidade === "organizacao") {
+    // mantém o bloco de membros (com busca/add/remove)
+    const htmlMembros = await renderBlocoMembrosOrg(pagina);
+    box.innerHTML = htmlMembros + htmlGenerico;
+    return;
+  }
+
+  if (entidade === "personagem") {
+    // mantém o bloco de orgs (com busca/add/remove)
+    const htmlOrgs = await renderBlocoOrgsPersonagem(pagina);
+    box.innerHTML = htmlOrgs + htmlGenerico;
+    return;
+  }
+
+  // outras entidades: só o genérico
+  box.innerHTML = htmlGenerico || "";
+}
+
+// -------------------------
+// Render genérico
+// -------------------------
+function renderRelacoesGenericas(rel) {
+  // Se teu backend ainda não retorna nada, não quebra
+  if (!rel) return "";
+
+  // Aceita alguns formatos comuns:
+  // A) { groups: [{label, items:[{id,titulo,entidade}]}] }
+  // B) { relacoes: { itens:[...], locais:[...] } }
+  // C) [{label, items:[...]}]
+  const groups =
+    Array.isArray(rel) ? rel :
+    Array.isArray(rel.groups) ? rel.groups :
+    rel.relacoes && typeof rel.relacoes === "object"
+      ? Object.entries(rel.relacoes).map(([k, items]) => ({ label: k, items }))
+      : [];
+
+  const normItems = (items) => (items || []).map(x => ({
+    id: x.id ?? x.page_id ?? x.target_id ?? x.pagina_id ?? x.relacionado_id,
+    titulo: x.titulo ?? x.nome ?? x.target_titulo ?? x.pagina_titulo ?? "",
+    entidade: (x.entidade ?? x.tipo ?? x.target_entidade ?? "").toLowerCase?.() ?? "",
+    extra: x.extra ?? x.cargo ?? x.role ?? ""
+  })).filter(i => i.id != null);
+
+  const sections = groups
+    .map(g => {
+      const items = normItems(g.items);
+      if (!items.length) return "";
+
+      const label = escapeHtml(String(g.label || "Relações"));
+
+      return `
+        <div style="margin-top:14px;">
+          <h4 style="margin:0 0 8px 0;">${label}</h4>
+          <div style="border:1px solid #eee; border-radius:10px; padding:8px;">
+            ${items.map(it => `
+              <div style="display:flex; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px solid #f2f2f2;">
+                <div style="min-width:0;">
+                  <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                    <strong>#${it.id}</strong> ${escapeHtml(it.titulo)}
+                    ${it.entidade ? `<span style="opacity:.65; font-size:12px;"> (${escapeHtml(it.entidade)})</span>` : ""}
+                  </div>
+                  ${it.extra ? `<div style="font-size:12px; opacity:.8;">${escapeHtml(it.extra)}</div>` : ""}
+                </div>
+                <button class="btn-ir-pagina" data-id="${it.id}">Abrir</button>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  // bind dos botões "Abrir"
+  queueMicrotask(() => {
+    document.querySelectorAll(".btn-ir-pagina").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = Number(btn.getAttribute("data-id"));
+        if (id) navigate(`/entity/${id}`);
+      });
+    });
+  });
+
+  return sections ? `<h3>Relacionamentos</h3>${sections}` : "";
+}
+
+// -------------------------
+// Blocos específicos (tu já tinha lógica; só empacotei)
+// -------------------------
+async function renderBlocoMembrosOrg(pagina) {
   let membros = [];
   try {
     membros = await api.listarMembrosDaOrg(pagina.id);
   } catch (e) {
-    box.innerHTML = `<h3>Membros</h3><p>Erro ao carregar: ${escapeHtml(e.message)}</p>`;
-    return;
+    return `<h3>Membros</h3><p>Erro ao carregar: ${escapeHtml(e.message)}</p>`;
   }
 
-  box.innerHTML = `
+  const html = `
     <h3>Membros</h3>
 
-    <div style="display:flex; gap:8px; margin:10px 0;">
-      <input id="membro-id" placeholder="ID do personagem" style="flex:1;" />
-      <button id="btn-adicionar-membro">Adicionar</button>
+    <div style="position:relative; margin:10px 0;">
+      <input id="membro-busca" placeholder="Digite o nome do personagem..." style="width:100%;" autocomplete="off" />
+      <div id="membro-sugestoes" style="
+        position:absolute;
+        top:100%;
+        left:0;
+        right:0;
+        background:white;
+        border:1px solid #ccc;
+        max-height:150px;
+        overflow:auto;
+        z-index:10;
+      "></div>
     </div>
 
     <div id="lista-membros">
@@ -256,32 +332,157 @@ if (getEntidade(pagina) === "organizacao") {
     </div>
   `;
 
-  // Adicionar membro: usa o endpoint do personagem
-  box.querySelector("#btn-adicionar-membro").addEventListener("click", async () => {
-    const personagemId = Number(box.querySelector("#membro-id").value);
-    if (!personagemId) return alert("Informe o ID do personagem");
+  // bind events depois que entrar no DOM
+  queueMicrotask(() => {
+    const box = document.querySelector("#relacionamentos");
+    const inputBusca = box?.querySelector("#membro-busca");
+    const sugestoesBox = box?.querySelector("#membro-sugestoes");
+    if (!inputBusca || !sugestoesBox) return;
 
-    try {
-      await api.vincularOrganizacao(personagemId, { organizacao_id: pagina.id });
-      await renderRelacionamentos(root, pagina);
-    } catch (e) {
-      alert("Erro ao adicionar membro: " + e.message);
-    }
-  });
+    inputBusca.addEventListener("input", async () => {
+      const termo = inputBusca.value.trim();
+      if (!termo) { sugestoesBox.innerHTML = ""; return; }
 
-  // Remover membro: usa o endpoint do personagem
-  box.querySelectorAll(".btn-remover-membro").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      const personagemId = Number(btn.getAttribute("data-personagem"));
       try {
-        await api.desvincularOrganizacao(personagemId, pagina.id);
-        await renderRelacionamentos(root, pagina);
+        const resultados = await api.buscarPages({ entidade: "personagem", q: termo });
+        sugestoesBox.innerHTML = "";
+
+        resultados.forEach(p => {
+          const item = document.createElement("div");
+          item.textContent = p.titulo;
+          item.style.padding = "6px";
+          item.style.cursor = "pointer";
+
+          item.addEventListener("click", async () => {
+            try {
+              await api.vincularOrganizacao(p.id, { organizacao_id: pagina.id });
+              // re-render do entity atual
+              await renderEntity(document.querySelector("#app"), pagina.id);
+            } catch (e) {
+              alert("Erro ao adicionar membro: " + e.message);
+            }
+          });
+
+          sugestoesBox.appendChild(item);
+        });
       } catch (e) {
-        alert("Erro ao remover membro: " + e.message);
+        console.error(e);
       }
     });
+
+    box.querySelectorAll(".btn-remover-membro").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const personagemId = Number(btn.getAttribute("data-personagem"));
+        try {
+          await api.desvincularOrganizacao(personagemId, pagina.id);
+          await renderEntity(document.querySelector("#app"), pagina.id);
+        } catch (e) {
+          alert("Erro ao remover membro: " + e.message);
+        }
+      });
+    });
   });
+
+  return html;
 }
+
+async function renderBlocoOrgsPersonagem(pagina) {
+  let orgs = [];
+  try {
+    orgs = await api.listarOrganizacoesDoPersonagem(pagina.id);
+  } catch (e) {
+    return `<h3>Organizações</h3><p>Erro ao carregar: ${escapeHtml(e.message)}</p>`;
+  }
+
+  const linkedIds = new Set(orgs.map(o => Number(o.organizacao_id ?? o.id)));
+
+  const html = `
+    <h3>Organizações</h3>
+
+    <div style="position:relative; margin:10px 0;">
+      <input id="org-busca" placeholder="Digite o nome da organização..." style="width:100%;" autocomplete="off" />
+      <div id="org-sugestoes" style="
+        position:absolute;
+        top:100%;
+        left:0;
+        right:0;
+        background:white;
+        border:1px solid #ccc;
+        max-height:150px;
+        overflow:auto;
+        z-index:10;
+      "></div>
+    </div>
+
+    <div id="lista-orgs">
+      ${
+        orgs.length
+          ? orgs.map(o => `
+            <div style="display:flex; justify-content:space-between; gap:8px; padding:8px 0; border-bottom:1px solid #eee;">
+              <div>
+                <div><strong>#${o.organizacao_id ?? o.id}</strong> ${escapeHtml(o.organizacao_titulo ?? o.titulo ?? o.nome ?? "")}</div>
+              </div>
+              <button class="btn-remover-org" data-org="${o.organizacao_id ?? o.id}">Remover</button>
+            </div>
+          `).join("")
+          : `<p>Nenhuma organização vinculada.</p>`
+      }
+    </div>
+  `;
+
+  queueMicrotask(() => {
+    const box = document.querySelector("#relacionamentos");
+    const inputBusca = box?.querySelector("#org-busca");
+    const sugestoesBox = box?.querySelector("#org-sugestoes");
+    if (!inputBusca || !sugestoesBox) return;
+
+    inputBusca.addEventListener("input", async () => {
+      const termo = inputBusca.value.trim();
+      if (!termo) { sugestoesBox.innerHTML = ""; return; }
+
+      try {
+        const resultados = await api.buscarPages({ entidade: "organizacao", q: termo });
+        sugestoesBox.innerHTML = "";
+
+        resultados
+          .filter(o => !linkedIds.has(Number(o.id)))
+          .forEach(o => {
+            const item = document.createElement("div");
+            item.textContent = o.titulo;
+            item.style.padding = "6px";
+            item.style.cursor = "pointer";
+
+            item.addEventListener("click", async () => {
+              try {
+                await api.vincularOrganizacao(pagina.id, { organizacao_id: o.id });
+                await renderEntity(document.querySelector("#app"), pagina.id);
+              } catch (e) {
+                alert("Erro ao adicionar organização: " + e.message);
+              }
+            });
+
+            sugestoesBox.appendChild(item);
+          });
+
+      } catch (e) {
+        console.error(e);
+      }
+    });
+
+    box.querySelectorAll(".btn-remover-org").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const orgId = Number(btn.getAttribute("data-org"));
+        try {
+          await api.desvincularOrganizacao(pagina.id, orgId);
+          await renderEntity(document.querySelector("#app"), pagina.id);
+        } catch (e) {
+          alert("Erro ao remover organização: " + e.message);
+        }
+      });
+    });
+  });
+
+  return html;
 }
 
 function escapeHtml(str) {

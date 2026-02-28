@@ -395,6 +395,69 @@ def api_criar_pagina():
 # ----------------------
 # Rotas básicas
 # ----------------------
+
+
+@app.route("/api/busca_pages")
+def busca_pages():
+    q = (request.args.get("q") or "").strip()
+    entidade = (request.args.get("entidade") or "").strip()
+
+    if entidade not in ("personagem","local","organizacao","criatura","evento","item"):
+        return jsonify([])
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # se quiser "começa com" ao invés de "contém", troca %q% por q%
+    cur.execute("""
+        SELECT id, titulo
+        FROM pages
+        WHERE entidade = ?
+          AND titulo LIKE ?
+        ORDER BY titulo ASC
+        LIMIT 10
+    """, (entidade, f"{q}%"))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return jsonify([{"id": r["id"], "titulo": r["titulo"]} for r in rows])
+
+@app.route("/api/organizacoes/<int:org_id>/add_membro", methods=["POST"])
+def add_membro(org_id):
+    data = request.get_json(force=True) or {}
+    personagem_id = int(data.get("personagem_id"))
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # opcional: valida se ids existem e entidades batem
+    cur.execute("SELECT entidade FROM pages WHERE id = ?", (org_id,))
+    row_org = cur.fetchone()
+    if not row_org or row_org[0] != "organizacao":
+        conn.close()
+        return jsonify({"ok": False, "erro": "Organização inválida"}), 400
+
+    cur.execute("SELECT entidade FROM pages WHERE id = ?", (personagem_id,))
+    row_p = cur.fetchone()
+    if not row_p or row_p[0] != "personagem":
+        conn.close()
+        return jsonify({"ok": False, "erro": "Personagem inválido"}), 400
+
+    try:
+        cur.execute("""
+            INSERT INTO relacoes (origem_page_id, destino_page_id, tipo_relacao)
+            VALUES (?, ?, ?)
+        """, (personagem_id, org_id, "membro_de"))
+        conn.commit()
+    except Exception as e:
+        # por causa do UNIQUE uq_relacao_tripla pode dar erro se já existir
+        conn.close()
+        return jsonify({"ok": False, "erro": str(e)}), 409
+
+    conn.close()
+    return jsonify({"ok": True})
+
 @app.route("/api/paginas", methods=["GET"])
 def api_listar_paginas():
     entidade = (request.args.get("entidade") or "").strip().lower()
@@ -1033,6 +1096,38 @@ def listar_membros_da_org(organizacao_id):
 @app.route("/api/_debug_routes", methods=["GET"])
 def _debug_routes():
     return jsonify(sorted([str(r) for r in app.url_map.iter_rules()]))
+
+
+@app.get("/api/relations/<int:page_id>")
+def api_relations(page_id):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Exemplo: retorna relações genéricas (ajusta nomes de tabelas/colunas)
+    # A ideia é devolver grupos por tipo/entidade
+
+    cur.execute("""
+      SELECT
+        r.tipo AS rel_tipo,
+        p.id  AS id,
+        p.titulo AS titulo,
+        COALESCE(p.entidade, p.tipo, '') AS entidade
+      FROM relations r
+      JOIN paginas p ON p.id = r.target_id
+      WHERE r.source_id = ?
+      ORDER BY r.tipo, p.titulo
+    """, (page_id,))
+    rows = cur.fetchall()
+
+    grupos = {}
+    for rel_tipo, rid, titulo, entidade in rows:
+        grupos.setdefault(rel_tipo, []).append({
+            "id": rid,
+            "titulo": titulo,
+            "entidade": entidade
+        })
+
+    return {"groups": [{"label": k, "items": v} for k, v in grupos.items()]}
 
 @app.route("/<path:path>")
 def spa_fallback(path):

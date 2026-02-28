@@ -23,6 +23,7 @@ async function jsonFetch(url, options = {}) {
 export const api = {
   listarPaginas: () => jsonFetch("/api/paginas"),
   pegarPagina: (id) => jsonFetch(`/api/pagina/${id}`),
+  getRelations: (pageId) => jsonFetch(`/api/relations/${pageId}`),  
 
   criarPagina: (payload) =>
     jsonFetch("/api/criar_pagina", { method: "POST", body: JSON.stringify(payload) }),
@@ -49,6 +50,10 @@ export const api = {
     }),
 
   // Organização -> Membros
+  // Busca genérica (autocomplete)
+  buscarPages: ({ entidade, q }) =>
+    jsonFetch(`/api/busca_pages?entidade=${encodeURIComponent(entidade)}&q=${encodeURIComponent(q)}`),
+  
   listarMembrosDaOrg: (orgId) =>
     jsonFetch(`/api/organizacao/${orgId}/membros`),
 };
