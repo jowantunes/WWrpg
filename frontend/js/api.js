@@ -23,7 +23,16 @@ async function jsonFetch(url, options = {}) {
 export const api = {
   listarPaginas: () => jsonFetch("/api/paginas"),
   pegarPagina: (id) => jsonFetch(`/api/pagina/${id}`),
-  getRelations: (pageId) => jsonFetch(`/api/relations/${pageId}`),  
+  getRelations: (pageId) => jsonFetch(`/api/relations/${pageId}`),
+  uploadImagem: async (file) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch("/api/upload", { method: "POST", body: formData });
+    let data = null;
+    try { data = await res.json(); } catch { data = { erro: await res.text() } }
+    if (!res.ok) throw new Error(data.erro || "Falha no upload");
+    return data;
+  },
 
   criarPagina: (payload) =>
     jsonFetch("/api/criar_pagina", { method: "POST", body: JSON.stringify(payload) }),
@@ -33,27 +42,22 @@ export const api = {
 
   excluirPagina: (id) =>
     jsonFetch(`/api/excluir_pagina?id=${id}`, { method: "POST" }),
-
-  // Personagem -> Organizações
-  listarOrganizacoesDoPersonagem: (personagemId) =>
-    jsonFetch(`/api/personagem/${personagemId}/organizacoes`),
-
-  vincularOrganizacao: (personagemId, payload) =>
-    jsonFetch(`/api/personagem/${personagemId}/organizacoes`, {
+  criarRelacao: (payload) =>
+    jsonFetch("/api/relations", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
 
-  desvincularOrganizacao: (personagemId, orgId) =>
-    jsonFetch(`/api/personagem/${personagemId}/organizacoes/${orgId}`, {
+  deletarRelacao: (relacaoId) =>
+    jsonFetch(`/api/relations/${relacaoId}`, {
       method: "DELETE",
     }),
 
-  // Organização -> Membros
   // Busca genérica (autocomplete)
-  buscarPages: ({ entidade, q }) =>
-    jsonFetch(`/api/busca_pages?entidade=${encodeURIComponent(entidade)}&q=${encodeURIComponent(q)}`),
-  
-  listarMembrosDaOrg: (orgId) =>
-    jsonFetch(`/api/organizacao/${orgId}/membros`),
+  buscarPages: ({ entidade, q }) => {
+    const params = new URLSearchParams();
+    if (entidade) params.append("entidade", entidade);
+    if (q) params.append("q", q);
+    return jsonFetch(`/api/busca_pages?${params.toString()}`);
+  }
 };

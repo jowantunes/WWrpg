@@ -8,8 +8,14 @@ from flask import Flask, jsonify, send_from_directory, request
 import sqlite3
 import os
 import time
+import uuid
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__, static_folder="frontend")
+
+UPLOAD_FOLDER = os.path.join(app.root_path, 'frontend', 'uploads')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 DB_FILE = "wiki.db"
 
@@ -402,61 +408,49 @@ def busca_pages():
     q = (request.args.get("q") or "").strip()
     entidade = (request.args.get("entidade") or "").strip()
 
-    if entidade not in ("personagem","local","organizacao","criatura","evento","item"):
-        return jsonify([])
-
     conn = get_conn()
     cur = conn.cursor()
 
-    # se quiser "começa com" ao invés de "contém", troca %q% por q%
-    cur.execute("""
-        SELECT id, titulo
-        FROM pages
-        WHERE entidade = ?
-          AND titulo LIKE ?
-        ORDER BY titulo ASC
-        LIMIT 10
-    """, (entidade, f"{q}%"))
+    sql = "SELECT id, titulo, entidade FROM pages WHERE titulo LIKE ?"
+    params = [f"%{q}%"]
+
+    if entidade:
+        if entidade not in ("personagem","local","organizacao","criatura","evento","item"):
+            return jsonify([])
+        sql += " AND entidade = ?"
+        params.append(entidade)
+        
+    sql += " ORDER BY titulo ASC LIMIT 10"
+
+    cur.execute(sql, params)
 
     rows = cur.fetchall()
     conn.close()
 
-    return jsonify([{"id": r["id"], "titulo": r["titulo"]} for r in rows])
+    return jsonify([{"id": r["id"], "titulo": r["titulo"], "entidade": r["entidade"]} for r in rows])
 
-@app.route("/api/organizacoes/<int:org_id>/add_membro", methods=["POST"])
-def add_membro(org_id):
-    data = request.get_json(force=True) or {}
-    personagem_id = int(data.get("personagem_id"))
 
-    conn = get_conn()
-    cur = conn.cursor()
 
-    # opcional: valida se ids existem e entidades batem
-    cur.execute("SELECT entidade FROM pages WHERE id = ?", (org_id,))
-    row_org = cur.fetchone()
-    if not row_org or row_org[0] != "organizacao":
-        conn.close()
-        return jsonify({"ok": False, "erro": "Organização inválida"}), 400
+@app.route("/api/upload", methods=["POST"])
+def api_upload_imagem():
+    if 'file' not in request.files:
+        return jsonify({"erro": "Nenhum arquivo enviado"}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"erro": "Nenhum arquivo selecionado"}), 400
 
-    cur.execute("SELECT entidade FROM pages WHERE id = ?", (personagem_id,))
-    row_p = cur.fetchone()
-    if not row_p or row_p[0] != "personagem":
-        conn.close()
-        return jsonify({"ok": False, "erro": "Personagem inválido"}), 400
-
-    try:
-        cur.execute("""
-            INSERT INTO relacoes (origem_page_id, destino_page_id, tipo_relacao)
-            VALUES (?, ?, ?)
-        """, (personagem_id, org_id, "membro_de"))
-        conn.commit()
-    except Exception as e:
-        # por causa do UNIQUE uq_relacao_tripla pode dar erro se já existir
-        conn.close()
-        return jsonify({"ok": False, "erro": str(e)}), 409
-
-    conn.close()
-    return jsonify({"ok": True})
+    if file:
+        filename = secure_filename(file.filename)
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
+            return jsonify({"erro": "Formato de arquivo não suportado"}), 400
+            
+        unique_filename = f"{uuid.uuid4().hex}{ext}"
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
+        file.save(filepath)
+        
+        return jsonify({"url": f"/uploads/{unique_filename}"}), 200
 
 @app.route("/api/paginas", methods=["GET"])
 def api_listar_paginas():
@@ -466,22 +460,33 @@ def api_listar_paginas():
     conn = get_conn()
     cur = conn.cursor()
 
-    sql = "SELECT id, titulo, entidade, imagem, autor, data_criacao, data_atualizacao FROM pages"
+    sql = """
+        SELECT 
+            p.id, p.titulo, p.entidade, p.imagem, p.autor, p.data_criacao, p.data_atualizacao,
+            COALESCE(pe.descricao, lo.descricao, org.descricao, cr.descricao, ev.descricao, it.descricao) as resumo
+        FROM pages p
+        LEFT JOIN personagens pe ON pe.page_id = p.id
+        LEFT JOIN locais lo ON lo.page_id = p.id
+        LEFT JOIN organizacoes org ON org.page_id = p.id
+        LEFT JOIN criaturas cr ON cr.page_id = p.id
+        LEFT JOIN eventos ev ON ev.page_id = p.id
+        LEFT JOIN itens it ON it.page_id = p.id
+    """
     params = []
     where = []
 
     if entidade:
-        where.append("entidade = ?")
+        where.append("p.entidade = ?")
         params.append(entidade)
 
     if q:
-        where.append("titulo LIKE ?")
+        where.append("p.titulo LIKE ?")
         params.append(f"%{q}%")
 
     if where:
         sql += " WHERE " + " AND ".join(where)
 
-    sql += " ORDER BY data_atualizacao DESC, id DESC LIMIT 200"
+    sql += " ORDER BY p.data_atualizacao DESC, p.id DESC LIMIT 200"
 
     cur.execute(sql, params)
     rows = cur.fetchall()
@@ -493,9 +498,10 @@ def api_listar_paginas():
             "id": r["id"],
             "titulo": r["titulo"],
             "entidade": r["entidade"],
-            "tipo": r["entidade"],
+            "tipo": r["entidade"],  # backward compatibility
             "imagem": r["imagem"],
             "autor": r["autor"],
+            "resumo": r["resumo"],
             "data_criacao": r["data_criacao"],
             "data_atualizacao": r["data_atualizacao"],
         })
@@ -968,166 +974,127 @@ def api_excluir_pagina():
     finally:
         conn.close()
 
-@app.route("/api/organizacoes", methods=["GET"])
-def api_listar_organizacoes():
+
+@app.route("/api/_debug_routes", methods=["GET"])
+def _debug_routes():
+    return jsonify(sorted([str(r) for r in app.url_map.iter_rules()]))
+
+@app.route("/api/relations/<int:page_id>", methods=["GET"])
+def listar_relacoes_gerais(page_id):
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT id, titulo
-        FROM pages
-        WHERE entidade = 'organizacao'
-        ORDER BY titulo COLLATE NOCASE
-        LIMIT 500
-    """)
-    rows = cur.fetchall()
-    conn.close()
-
-    return jsonify([{"id": r["id"], "titulo": r["titulo"]} for r in rows])
-@app.route("/api/personagem/<int:personagem_id>/organizacoes", methods=["GET"])
-def listar_organizacoes_do_personagem(personagem_id):
-    conn = get_conn()
-    cur = conn.cursor()
+    # Relações onde a página é ORIGEM
     cur.execute("""
         SELECT
-            r.destino_page_id AS organizacao_id,
-            p.titulo AS organizacao_titulo,
-            r.rotulo AS cargo,
-            r.data_inicio AS desde,
-            r.data_fim AS ate,
+            r.id AS relacao_id,
+            r.tipo_relacao,
+            r.destino_page_id AS related_id,
+            p.titulo AS related_titulo,
+            p.entidade AS related_entidade,
+            r.rotulo,
+            r.data_inicio,
+            r.data_fim,
             r.notas
         FROM relacoes r
         JOIN pages p ON p.id = r.destino_page_id
         WHERE r.origem_page_id = ?
-          AND r.tipo_relacao = 'membro_de'
-        ORDER BY p.titulo ASC
-    """, (personagem_id,))
-    rows = cur.fetchall()
+    """, (page_id,))
+    origem_rows = cur.fetchall()
+
+    # Relações onde a página é DESTINO
+    cur.execute("""
+        SELECT
+            r.id AS relacao_id,
+            r.tipo_relacao,
+            r.origem_page_id AS related_id,
+            p.titulo AS related_titulo,
+            p.entidade AS related_entidade,
+            r.rotulo,
+            r.data_inicio,
+            r.data_fim,
+            r.notas
+        FROM relacoes r
+        JOIN pages p ON p.id = r.origem_page_id
+        WHERE r.destino_page_id = ?
+    """, (page_id,))
+    destino_rows = cur.fetchall()
+
     conn.close()
 
-    return jsonify([{
-        "organizacao_id": r["organizacao_id"],
-        "organizacao_titulo": r["organizacao_titulo"],
-        "cargo": r["cargo"],
-        "desde": r["desde"],
-        "ate": r["ate"],
-        "status": None,  # legado, não existe mais
-        "notas": r["notas"],
-    } for r in rows])
+    grupos = {}
 
-@app.route("/api/personagem/<int:personagem_id>/organizacoes", methods=["POST"])
-def vincular_org_ao_personagem(personagem_id):
+    def adicionar_ao_grupo(row):
+        tipo = row["tipo_relacao"]
+        grupos.setdefault(tipo, []).append({
+            "relacao_id": row["relacao_id"],
+            "id": row["related_id"],
+            "titulo": row["related_titulo"],
+            "entidade": row["related_entidade"],
+            "rotulo": row["rotulo"],
+            "desde": row["data_inicio"],
+            "ate": row["data_fim"],
+            "notas": row["notas"]
+        })
+
+    for r in origem_rows:
+        adicionar_ao_grupo(r)
+
+    for r in destino_rows:
+        adicionar_ao_grupo(r)
+
+    return jsonify({
+        "groups": [
+            {"label": tipo, "items": items}
+            for tipo, items in grupos.items()
+        ]
+    })
+@app.route("/api/relations", methods=["POST"])
+def criar_relacao_generica():
     data = request.get_json(silent=True) or {}
-    organizacao_id = _to_int_or_none(data.get("organizacao_id"))
-    if not organizacao_id:
-        return jsonify({"erro": "organizacao_id é obrigatório"}), 400
 
-    cargo = _to_text_or_none(data.get("cargo"))
-    desde = _to_text_or_none(data.get("desde"))
-    ate = _to_text_or_none(data.get("ate"))
+    origem = _to_int_or_none(data.get("origem_page_id"))
+    destino = _to_int_or_none(data.get("destino_page_id"))
+    tipo = _to_text_or_none(data.get("tipo_relacao"))
+
+    if not origem or not destino or not tipo:
+        return jsonify({"erro": "origem_page_id, destino_page_id e tipo_relacao são obrigatórios"}), 400
+
+    rotulo = _to_text_or_none(data.get("rotulo"))
     notas = _to_text_or_none(data.get("notas"))
+    desde = _to_text_or_none(data.get("data_inicio"))
+    ate = _to_text_or_none(data.get("data_fim"))
 
     conn = get_conn()
     cur = conn.cursor()
     try:
         cur.execute("""
-            INSERT INTO relacoes
-              (origem_page_id, destino_page_id, tipo_relacao, rotulo, notas, data_inicio, data_fim)
-            VALUES (?, ?, 'membro_de', ?, ?, ?, ?)
+            INSERT INTO relacoes (origem_page_id, destino_page_id, tipo_relacao, rotulo, notas, data_inicio, data_fim)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(origem_page_id, destino_page_id, tipo_relacao)
             DO UPDATE SET
               rotulo=excluded.rotulo,
               notas=excluded.notas,
               data_inicio=excluded.data_inicio,
               data_fim=excluded.data_fim
-        """, (personagem_id, organizacao_id, cargo, notas, desde, ate))
+        """, (origem, destino, tipo, rotulo, notas, desde, ate))
         conn.commit()
         return jsonify({"ok": True})
     except Exception as e:
         conn.rollback()
-        return jsonify({"erro": "Erro ao vincular", "detalhe": str(e)}), 500
+        return jsonify({"erro": "Erro ao criar relação", "detalhe": str(e)}), 500
     finally:
         conn.close()
 
-@app.route("/api/personagem/<int:personagem_id>/organizacoes/<int:organizacao_id>", methods=["DELETE"])
-def desvincular_org(personagem_id, organizacao_id):
+
+@app.route("/api/relations/<int:relacao_id>", methods=["DELETE"])
+def deletar_relacao(relacao_id):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        DELETE FROM relacoes
-        WHERE origem_page_id = ?
-          AND destino_page_id = ?
-          AND tipo_relacao = 'membro_de'
-    """, (personagem_id, organizacao_id))
+    cur.execute("DELETE FROM relacoes WHERE id = ?", (relacao_id,))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
-
-@app.route("/api/organizacao/<int:organizacao_id>/membros", methods=["GET"])
-def listar_membros_da_org(organizacao_id):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            r.origem_page_id AS personagem_id,
-            p.titulo AS personagem_titulo,
-            r.rotulo AS cargo,
-            r.data_inicio AS desde,
-            r.data_fim AS ate,
-            r.notas
-        FROM relacoes r
-        JOIN pages p ON p.id = r.origem_page_id
-        WHERE r.destino_page_id = ?
-          AND r.tipo_relacao = 'membro_de'
-        ORDER BY p.titulo ASC
-    """, (organizacao_id,))
-    rows = cur.fetchall()
-    conn.close()
-
-    return jsonify([{
-        "personagem_id": r["personagem_id"],
-        "personagem_titulo": r["personagem_titulo"],
-        "cargo": r["cargo"],
-        "desde": r["desde"],
-        "ate": r["ate"],
-        "status": None,
-        "notas": r["notas"],
-    } for r in rows])
-@app.route("/api/_debug_routes", methods=["GET"])
-def _debug_routes():
-    return jsonify(sorted([str(r) for r in app.url_map.iter_rules()]))
-
-
-@app.get("/api/relations/<int:page_id>")
-def api_relations(page_id):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    # Exemplo: retorna relações genéricas (ajusta nomes de tabelas/colunas)
-    # A ideia é devolver grupos por tipo/entidade
-
-    cur.execute("""
-      SELECT
-        r.tipo AS rel_tipo,
-        p.id  AS id,
-        p.titulo AS titulo,
-        COALESCE(p.entidade, p.tipo, '') AS entidade
-      FROM relations r
-      JOIN paginas p ON p.id = r.target_id
-      WHERE r.source_id = ?
-      ORDER BY r.tipo, p.titulo
-    """, (page_id,))
-    rows = cur.fetchall()
-
-    grupos = {}
-    for rel_tipo, rid, titulo, entidade in rows:
-        grupos.setdefault(rel_tipo, []).append({
-            "id": rid,
-            "titulo": titulo,
-            "entidade": entidade
-        })
-
-    return {"groups": [{"label": k, "items": v} for k, v in grupos.items()]}
 
 @app.route("/<path:path>")
 def spa_fallback(path):

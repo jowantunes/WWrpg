@@ -1,22 +1,63 @@
 <!doctype html>
 <html lang="pt">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Wiki Worldbuilding</title>
+  <title>Limiar - Base de Dados</title>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Inter:wght@400;500;600&display=swap"
+    rel="stylesheet">
   <link rel="stylesheet" href="style.css" />
 </head>
+
 <body>
-  <header style="display:flex; gap:12px; align-items:center;">
-    <h1 style="margin:0;">Wiki Worldbuilding</h1>
-    <nav style="display:flex; gap:8px; margin-left:auto;">
-      <a href="/" data-link>Home</a>
-      <a href="/admin" data-link>Admin</a>
-    </nav>
-  </header>
+  <div id="layout-wrapper">
+    <!-- Sidebar Retrátil -->
+    <aside id="sidebar" class="dark-surface">
+      <div class="sidebar-header">
+        <h2 class="title-paranormal sidebar-logo" style="margin:0; font-size:18px;">LIMIAR</h2>
+        <button id="toggle-sidebar" class="btn-ghost" style="font-size:18px;">☰</button>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="/" data-link class="nav-item">
+          <span class="icon">⊞</span><span class="label">Dashboard</span>
+        </a>
+        <a href="/categorias/personagem" data-link class="nav-item">
+          <span class="icon">👤</span><span class="label">Personagens</span>
+        </a>
+        <a href="/categorias/organizacao" data-link class="nav-item">
+          <span class="icon">⚖️</span><span class="label">Organizações</span>
+        </a>
+        <a href="/categorias/local" data-link class="nav-item">
+          <span class="icon">📍</span><span class="label">Locais</span>
+        </a>
+        <a href="/categorias/evento" data-link class="nav-item">
+          <span class="icon">⏳</span><span class="label">Eventos</span>
+        </a>
+        <a href="/categorias/criatura" data-link class="nav-item">
+          <span class="icon">👁️</span><span class="label">Criaturas</span>
+        </a>
+        <a href="/categorias/item" data-link class="nav-item">
+          <span class="icon">🗡️</span><span class="label">Itens</span>
+        </a>
+        <div class="sidebar-divider"></div>
+        <a href="/admin" data-link class="nav-item danger-hover">
+          <span class="icon" style="color:var(--brand-accent);">➕</span><span class="label">Nova Entidade</span>
+        </a>
+      </nav>
+    </aside>
 
-  <main id="app" style="margin-top:16px;"></main>
+    <main id="main-content">
+      <div id="app"></div>
+    </main>
+  </div>
 
+  <script>
+    document.getElementById('toggle-sidebar').addEventListener('click', () => {
+      document.getElementById('sidebar').classList.toggle('collapsed');
+    });
+  </script>
   <script type="module" src="/js/app.js"></script>
 </body>
+
 </html>

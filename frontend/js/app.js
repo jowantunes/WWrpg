@@ -1,6 +1,7 @@
 import { renderHome } from "./views/home.js";
 import { renderEntity } from "./views/entity.js";
 import { renderAdmin } from "./views/admin.js";
+import { renderCategoria } from "./views/categoria.js";
 
 const app = document.getElementById("app");
 
@@ -36,6 +37,12 @@ function route(path) {
   if (entityMatch) {
     const id = entityMatch[1];
     return renderEntity(app, id);
+  }
+
+  const catMatch = path.match(/^\/categorias\/(.+)$/);
+  if (catMatch) {
+    const tipo = catMatch[1];
+    return renderCategoria(app, tipo);
   }
 
   // 404
