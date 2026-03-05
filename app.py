@@ -177,6 +177,25 @@ def run_migrations():
         )
     """)
 
+    # Migration: posts table
+    cursor.executescript("""
+        CREATE TABLE IF NOT EXISTS posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_page_id INTEGER NOT NULL,
+            tipo TEXT NOT NULL CHECK(tipo IN ('historia','nota')),
+            titulo TEXT,
+            conteudo_html TEXT NOT NULL DEFAULT '',
+            ordem INTEGER NOT NULL DEFAULT 0,
+            criado_em TEXT DEFAULT (datetime('now')),
+            atualizado_em TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (owner_page_id) REFERENCES pages(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_posts_owner_tipo_ordem
+            ON posts(owner_page_id, tipo, ordem);
+        CREATE INDEX IF NOT EXISTS idx_posts_owner
+            ON posts(owner_page_id);
+    """)
+
     conn.commit()
     conn.close()
 
@@ -1095,6 +1114,172 @@ def deletar_relacao(relacao_id):
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
+
+
+# ----------------------
+# Posts
+# ----------------------
+
+@app.route("/api/pages/<int:page_id>/posts", methods=["GET"])
+def api_listar_posts(page_id):
+    tipo = (request.args.get("tipo") or "").strip().lower()
+    if tipo not in ("historia", "nota"):
+        return jsonify({"erro": "tipo deve ser 'historia' ou 'nota'"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, owner_page_id, tipo, titulo, conteudo_html, ordem, criado_em, atualizado_em
+        FROM posts
+        WHERE owner_page_id = ? AND tipo = ?
+        ORDER BY ordem ASC, id ASC
+    """, (page_id, tipo))
+    rows = cur.fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/pages/<int:page_id>/posts", methods=["POST"])
+def api_criar_post(page_id):
+    # Verify page exists
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM pages WHERE id = ?", (page_id,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({"erro": "Página não encontrada"}), 404
+
+    data = request.get_json(silent=True) or {}
+    tipo = (data.get("tipo") or "").strip().lower()
+    if tipo not in ("historia", "nota"):
+        conn.close()
+        return jsonify({"erro": "tipo deve ser 'historia' ou 'nota'"}), 400
+
+    titulo = _to_text_or_none(data.get("titulo"))
+    conteudo_html = data.get("conteudo_html") or ""
+
+    try:
+        # ordem = MAX(ordem) + 1 for this owner+tipo
+        cur.execute("""
+            SELECT COALESCE(MAX(ordem), -1) + 1 FROM posts
+            WHERE owner_page_id = ? AND tipo = ?
+        """, (page_id, tipo))
+        next_ordem = cur.fetchone()[0]
+
+        cur.execute("""
+            INSERT INTO posts (owner_page_id, tipo, titulo, conteudo_html, ordem)
+            VALUES (?, ?, ?, ?, ?)
+        """, (page_id, tipo, titulo, conteudo_html, next_ordem))
+        post_id = cur.lastrowid
+        conn.commit()
+        return jsonify({"ok": True, "id": post_id}), 201
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"erro": "Erro ao criar post", "detalhe": str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/api/posts/<int:post_id>", methods=["PUT"])
+def api_editar_post(post_id):
+    data = request.get_json(silent=True) or {}
+    titulo = _to_text_or_none(data.get("titulo"))
+    conteudo_html = data.get("conteudo_html") or ""
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM posts WHERE id = ?", (post_id,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({"erro": "Post não encontrado"}), 404
+
+    try:
+        cur.execute("""
+            UPDATE posts
+            SET titulo = ?, conteudo_html = ?, atualizado_em = datetime('now')
+            WHERE id = ?
+        """, (titulo, conteudo_html, post_id))
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"erro": "Erro ao editar post", "detalhe": str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/api/posts/<int:post_id>", methods=["DELETE"])
+def api_excluir_post(post_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM posts WHERE id = ?", (post_id,))
+    if not cur.fetchone():
+        conn.close()
+        return jsonify({"erro": "Post não encontrado"}), 404
+
+    try:
+        cur.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"erro": "Erro ao excluir post", "detalhe": str(e)}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/api/posts/<int:post_id>/reorder", methods=["POST"])
+def api_reordenar_post(post_id):
+    data = request.get_json(silent=True) or {}
+    direction = (data.get("direction") or "").strip().lower()
+    if direction not in ("up", "down"):
+        return jsonify({"erro": "direction deve ser 'up' ou 'down'"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, owner_page_id, tipo, ordem FROM posts WHERE id = ?", (post_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"erro": "Post não encontrado"}), 404
+
+    owner_page_id = row["owner_page_id"]
+    tipo = row["tipo"]
+    ordem_atual = row["ordem"]
+
+    # Find neighbour
+    if direction == "up":
+        cur.execute("""
+            SELECT id, ordem FROM posts
+            WHERE owner_page_id = ? AND tipo = ? AND ordem < ?
+            ORDER BY ordem DESC LIMIT 1
+        """, (owner_page_id, tipo, ordem_atual))
+    else:
+        cur.execute("""
+            SELECT id, ordem FROM posts
+            WHERE owner_page_id = ? AND tipo = ? AND ordem > ?
+            ORDER BY ordem ASC LIMIT 1
+        """, (owner_page_id, tipo, ordem_atual))
+
+    neighbour = cur.fetchone()
+    if not neighbour:
+        conn.close()
+        return jsonify({"ok": True, "noop": True})  # already at boundary
+
+    try:
+        neighbour_id = neighbour["id"]
+        neighbour_ordem = neighbour["ordem"]
+        # Swap orders
+        cur.execute("UPDATE posts SET ordem = ? WHERE id = ?", (neighbour_ordem, post_id))
+        cur.execute("UPDATE posts SET ordem = ? WHERE id = ?", (ordem_atual, neighbour_id))
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"erro": "Erro ao reordenar", "detalhe": str(e)}), 500
+    finally:
+        conn.close()
 
 @app.route("/<path:path>")
 def spa_fallback(path):

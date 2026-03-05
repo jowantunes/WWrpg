@@ -59,5 +59,30 @@ export const api = {
     if (entidade) params.append("entidade", entidade);
     if (q) params.append("q", q);
     return jsonFetch(`/api/busca_pages?${params.toString()}`);
-  }
+  },
+
+  // Posts
+  listarPosts: (pageId, tipo) =>
+    jsonFetch(`/api/pages/${pageId}/posts?tipo=${encodeURIComponent(tipo)}`),
+
+  criarPost: (pageId, payload) =>
+    jsonFetch(`/api/pages/${pageId}/posts`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  editarPost: (postId, payload) =>
+    jsonFetch(`/api/posts/${postId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  excluirPost: (postId) =>
+    jsonFetch(`/api/posts/${postId}`, { method: "DELETE" }),
+
+  reordenarPost: (postId, direction) =>
+    jsonFetch(`/api/posts/${postId}/reorder`, {
+      method: "POST",
+      body: JSON.stringify({ direction }),
+    }),
 };

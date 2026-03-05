@@ -8,6 +8,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Inter:wght@400;500;600&display=swap"
     rel="stylesheet">
   <link rel="stylesheet" href="style.css" />
+  <script src="https://unpkg.com/lucide@latest"></script>
 </head>
 
 <body>
@@ -23,26 +24,27 @@
           <span class="icon">⊞</span><span class="label">Dashboard</span>
         </a>
         <a href="/categorias/personagem" data-link class="nav-item">
-          <span class="icon">👤</span><span class="label">Personagens</span>
+          <span class="icon"><i data-lucide="user"></i></span><span class="label">Personagens</span>
         </a>
         <a href="/categorias/organizacao" data-link class="nav-item">
-          <span class="icon">⚖️</span><span class="label">Organizações</span>
+          <span class="icon"><i data-lucide="users"></i></span><span class="label">Organizações</span>
         </a>
         <a href="/categorias/local" data-link class="nav-item">
-          <span class="icon">📍</span><span class="label">Locais</span>
+          <span class="icon"><i data-lucide="map-pin"></i></span><span class="label">Locais</span>
         </a>
         <a href="/categorias/evento" data-link class="nav-item">
-          <span class="icon">⏳</span><span class="label">Eventos</span>
+          <span class="icon"><i data-lucide="calendar"></i></span><span class="label">Eventos</span>
         </a>
         <a href="/categorias/criatura" data-link class="nav-item">
-          <span class="icon">👁️</span><span class="label">Criaturas</span>
+          <span class="icon"><i data-lucide="shell"></i></span><span class="label">Criaturas</span>
         </a>
         <a href="/categorias/item" data-link class="nav-item">
-          <span class="icon">🗡️</span><span class="label">Itens</span>
+          <span class="icon"><i data-lucide="backpack"></i></span><span class="label">Itens</span>
         </a>
         <div class="sidebar-divider"></div>
         <a href="/admin" data-link class="nav-item danger-hover">
-          <span class="icon" style="color:var(--brand-accent);">➕</span><span class="label">Nova Entidade</span>
+          <span class="icon" style="color:var(--brand-accent);"><i data-lucide="plus"></i></span><span
+            class="label">Nova Entidade</span>
         </a>
       </nav>
     </aside>
@@ -51,7 +53,9 @@
       <div id="app"></div>
     </main>
   </div>
-
+  <script>
+    lucide.createIcons();
+  </script>
   <script>
     document.getElementById('toggle-sidebar').addEventListener('click', () => {
       document.getElementById('sidebar').classList.toggle('collapsed');
