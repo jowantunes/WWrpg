@@ -261,7 +261,7 @@ export async function renderHome(root) {
       results.sort((a, b) => b.id - a.id);
     }
 
-    const slice = results.slice(0, 8);
+    const slice = results.slice(0, 10);
     if (slice.length === 0) {
       grid.innerHTML = `<p style="color:var(--text-muted); font-style:italic;">O diretório está vazio.</p>`;
     } else {

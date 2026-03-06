@@ -4,14 +4,18 @@ import time
 
 DB_FILE = "wiki.db"
 
-from flask import Flask, jsonify, send_from_directory, request
+from flask import Flask, jsonify, send_from_directory, request, session
 import sqlite3
 import os
 import time
 import uuid
+import functools
+from datetime import datetime
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__, static_folder="frontend")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "limiar-secret-key-change-me")
 
 UPLOAD_FOLDER = os.path.join(app.root_path, 'frontend', 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -159,12 +163,73 @@ def criar_tabelas(reset=True):
     CREATE INDEX IF NOT EXISTS idx_rel_origem_tipo ON relacoes(origem_page_id, tipo_relacao);
     CREATE INDEX IF NOT EXISTS idx_rel_destino_tipo ON relacoes(destino_page_id, tipo_relacao);
 
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_relacao_tripla
-    ON relacoes(origem_page_id, destino_page_id, tipo_relacao);
+    -- =========================
+    -- AUTH: USUÁRIOS
+    -- =========================
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('admin','editor','viewer')),
+        created_at TEXT DEFAULT (datetime('now')),
+        last_login TEXT,
+        is_active INTEGER DEFAULT 1
+    );
+
     """)
 
     conn.commit()
     conn.close()
+
+def ensure_admin_user():
+    """Cria o admin padrão se a tabela de usuários estiver vazia."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) as count FROM users")
+    if cur.fetchone()["count"] == 0:
+        admin_pass = "admin123"
+        hash_pw = generate_password_hash(admin_pass)
+        cur.execute("""
+            INSERT INTO users (username, password_hash, role)
+            VALUES (?, ?, ?)
+        """, ("admin", hash_pw, "admin"))
+        print(f"[*] Usuário admin criado: admin / {admin_pass}")
+    conn.commit()
+    conn.close()
+
+# --- Decorators de Auth ---
+
+def get_current_user():
+    user_id = session.get("user_id")
+    if not user_id:
+        return None
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, username, role FROM users WHERE id = ? AND is_active = 1", (user_id,))
+    user = cur.fetchone()
+    conn.close()
+    return user
+
+def login_required(f):
+    @functools.wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not get_current_user():
+            return jsonify({"erro": "Login necessário"}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+def roles_required(*roles):
+    def decorator(f):
+        @functools.wraps(f)
+        def decorated_function(*args, **kwargs):
+            user = get_current_user()
+            if not user:
+                return jsonify({"erro": "Login necessário"}), 401
+            if user["role"] not in roles:
+                return jsonify({"erro": "Sem permissão"}), 403
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
     
 def run_migrations():
     conn = get_conn()
@@ -197,8 +262,79 @@ def run_migrations():
     """)
 
     conn.commit()
+    # Migration: timeline_events table
+    cursor.executescript("""
+        CREATE TABLE IF NOT EXISTS timeline_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            page_id INTEGER,
+            start_text TEXT NOT NULL, -- Format "YYYY-MM-DD HH:MM"
+            title TEXT,
+            description TEXT,
+            group_name TEXT,
+            color TEXT,
+            FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_timeline_start ON timeline_events(start_text);
+        CREATE INDEX IF NOT EXISTS idx_timeline_group ON timeline_events(group_name);
+    """)
+
+    # Migration: Campaign Archive
+    cursor.executescript("""
+        CREATE TABLE IF NOT EXISTS campaign_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT,
+            file_path TEXT NOT NULL,
+            file_name TEXT,
+            mime_type TEXT,
+            file_kind TEXT,
+            file_size INTEGER,
+            is_public INTEGER DEFAULT 0,
+            author_username TEXT,
+            tags_text TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS file_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id INTEGER NOT NULL,
+            page_id INTEGER NOT NULL,
+            note TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(file_id, page_id),
+            FOREIGN KEY (file_id) REFERENCES campaign_files(id) ON DELETE CASCADE,
+            FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_file_links_file ON file_links(file_id);
+        CREATE INDEX IF NOT EXISTS idx_file_links_page ON file_links(page_id);
+    """)
     conn.close()
 
+def ensure_timeline_sort_order():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # vê se a coluna existe
+    cur.execute("PRAGMA table_info(timeline_events)")
+    cols = [r["name"] for r in cur.fetchall()]
+
+    if "sort_order" not in cols:
+        cur.execute("ALTER TABLE timeline_events ADD COLUMN sort_order INTEGER DEFAULT 0")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_timeline_sort_order ON timeline_events(sort_order)")
+
+        # seed inicial: usar a ordem por data como sort_order
+        cur.execute("""
+          WITH ordered AS (
+            SELECT id,
+                   ROW_NUMBER() OVER (ORDER BY start_text ASC, id ASC) AS rn
+            FROM timeline_events
+          )
+          UPDATE timeline_events
+          SET sort_order = (SELECT rn FROM ordered WHERE ordered.id = timeline_events.id);
+        """)
+
+    conn.commit()
+    conn.close()
 import json
 
 def _to_text_or_none(v):
@@ -451,6 +587,7 @@ def busca_pages():
 
 
 @app.route("/api/upload", methods=["POST"])
+@roles_required("admin", "editor")
 def api_upload_imagem():
     if 'file' not in request.files:
         return jsonify({"erro": "Nenhum arquivo enviado"}), 400
@@ -530,6 +667,66 @@ def api_listar_paginas():
 @app.route("/")
 def index():
     return send_from_directory("frontend", "index.html")
+
+@app.route("/api/timeline", methods=["GET"])
+def api_get_timeline():
+    start_param = request.args.get("start", "").replace("+", " ").strip()
+    end_param = request.args.get("end", "").replace("+", " ").strip()
+    group_param = request.args.get("group", "").strip()
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    sql = """
+        SELECT t.*, p.entidade as page_entidade, p.imagem as page_image
+        FROM timeline_events t
+        JOIN pages p ON p.id = t.page_id
+        WHERE 1=1
+    """
+    params = []
+
+    if start_param:
+        sql += " AND t.start_text >= ?"
+        params.append(start_param)
+    
+    if end_param:
+        sql += " AND t.start_text <= ?"
+        params.append(end_param)
+
+    if group_param and group_param.lower() != "todos":
+        sql += " AND t.group_name = ?"
+        params.append(group_param)
+
+    sql += " ORDER BY t.start_text ASC"
+
+    cur.execute(sql, params)
+    rows = cur.fetchall()
+    
+    # Also fetch unique groups for the filter
+    cur.execute("SELECT DISTINCT group_name FROM timeline_events WHERE group_name IS NOT NULL ORDER BY group_name")
+    group_rows = cur.fetchall()
+    groups = [r["group_name"] for r in group_rows]
+
+    conn.close()
+
+    events = []
+    for r in rows:
+        events.append({
+            "id": r["id"],
+            "page_id": r["page_id"],
+            "start": r["start_text"],
+            "title": r["title"],
+            "desc": r["description"],
+            "group": r["group_name"],
+            "color": r["color"],
+            "image": r["page_image"],
+            "pageUrl": f"/entity/{r['page_id']}" if r["page_id"] else None
+        })
+
+    return jsonify({
+        "events": events,
+        "groups": groups
+    })
 
 
 
@@ -654,12 +851,17 @@ def api_get_pagina(pagina_id):
 @app.route("/api/pages", methods=["POST"])              # opcional (alias)
 @app.route("/api/criar_pagina", methods=["POST"])       # alias p/ front antigo
 @app.route("/api/criar_paginas", methods=["POST"])      # alias p/ front antigo
+@roles_required("admin", "editor")
 def api_criar_pagina_universal():
+    user = get_current_user() 
     data = request.get_json(silent=True) or {}
     data = _merge_payload(data)
-
+    
     # Compatibilidade: alguns fronts mandam "tipo" como entidade
     entidade = (data.get("entidade") or data.get("tipo") or "").strip().lower()
+    
+    autor = user["username"] # Autor automático do usuário logado
+
     if not entidade:
         entidade = (data.get("tipo") or "").strip().lower()
 
@@ -672,7 +874,8 @@ def api_criar_pagina_universal():
     if entidade not in entidades_validas:
         return jsonify({"erro": f"Entidade inválida. Use: {sorted(entidades_validas)}"}), 400
 
-    autor = _to_text_or_none(data.get("autor"))
+    # autor = _to_text_or_none(data.get("autor"))  <-- Removido: agora é automático
+    autor = user["username"]
     imagem = _to_text_or_none(data.get("imagem"))
     notas = data.get("notas")
     if notas is not None:
@@ -752,6 +955,30 @@ def api_criar_pagina_universal():
                 _to_text_or_none(data.get("data_fim")),
             ))
 
+            # ---- TIMELINE AUTO (seguro, não duplica) ----
+            # start_text: usa data_inicio se vier no payload; senão usa data_criacao
+            start_text = _to_text_or_none(data.get("data_inicio") or data.get("data"))
+            if not start_text:
+                cur.execute("SELECT substr(data_criacao, 1, 16) AS dt FROM pages WHERE id = ?", (page_id,))
+                row = cur.fetchone()
+                start_text = (row["dt"] if row else None) or "0001-01-01 00:00"
+
+            cur.execute("""
+                INSERT INTO timeline_events (page_id, start_text, title, description, group_name, color)
+                SELECT ?, ?, ?, ?, ?, ?
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM timeline_events WHERE page_id = ?
+                )
+            """, (
+                page_id,
+                start_text,
+                titulo,
+                _to_text_or_none(data.get("descricao")) or notas,
+                None,  # group_name (podes ligar depois a tags ou a um campo)
+                None,  # color
+                page_id
+            ))
+
         elif entidade == "item":
             cur.execute("""
                 INSERT INTO itens (page_id, tipo, descricao)
@@ -789,6 +1016,7 @@ def api_criar_pagina_universal():
 # ----------------------
 @app.route("/api/editar_pagina", methods=["POST"])
 @app.route("/api/editar_paginas", methods=["POST"])
+@roles_required("admin", "editor")
 def api_editar_pagina():
     print(">>> ENTROU NO api_editar_pagina")
 
@@ -816,7 +1044,7 @@ def api_editar_pagina():
     entidade = row["entidade"]
 
     titulo = (data.get("titulo") or "").strip()
-    autor = _to_text_or_none(data.get("autor"))
+    # autor = _to_text_or_none(data.get("autor")) <-- Não permite mudar autor no edit
     imagem = _to_text_or_none(data.get("imagem"))
     notas = data.get("notas")
     if notas is not None:
@@ -833,9 +1061,9 @@ def api_editar_pagina():
         # BASE
         cur.execute("""
             UPDATE pages
-            SET titulo = ?, autor = ?, imagem = ?, notas = ?, data_atualizacao = datetime('now')
+            SET titulo = ?, imagem = ?, notas = ?, data_atualizacao = datetime('now')
             WHERE id = ?
-        """, (titulo, autor, imagem, notas, pid))
+        """, (titulo, imagem, notas, pid))
 
         # ESPECÍFICOS (todos com page_id)
         if entidade == "personagem":
@@ -972,6 +1200,7 @@ def api_editar_pagina():
 # ----------------------
 @app.route("/api/excluir_pagina", methods=["POST"])
 @app.route("/api/excluir_paginas", methods=["POST"])
+@roles_required("admin", "editor")
 def api_excluir_pagina():
     data = request.get_json(silent=True) or {}
     pagina_id = _get_id_from_request(data)
@@ -984,6 +1213,9 @@ def api_excluir_pagina():
     conn = get_conn()
     cur = conn.cursor()
     try:
+        # Cascade manual for timeline (since FK is SET NULL but we want DELETE)
+        cur.execute("DELETE FROM timeline_events WHERE page_id = ?", (pagina_id,))
+        
         cur.execute("DELETE FROM pages WHERE id = ?", (pagina_id,))
         conn.commit()
         return jsonify({"ok": True})
@@ -1011,6 +1243,7 @@ def listar_relacoes_gerais(page_id):
             r.destino_page_id AS related_id,
             p.titulo AS related_titulo,
             p.entidade AS related_entidade,
+            p.imagem AS related_image,
             r.rotulo,
             r.data_inicio,
             r.data_fim,
@@ -1029,6 +1262,7 @@ def listar_relacoes_gerais(page_id):
             r.origem_page_id AS related_id,
             p.titulo AS related_titulo,
             p.entidade AS related_entidade,
+            p.imagem AS related_image,
             r.rotulo,
             r.data_inicio,
             r.data_fim,
@@ -1050,6 +1284,7 @@ def listar_relacoes_gerais(page_id):
             "id": row["related_id"],
             "titulo": row["related_titulo"],
             "entidade": row["related_entidade"],
+            "imagem": row["related_image"],
             "rotulo": row["rotulo"],
             "desde": row["data_inicio"],
             "ate": row["data_fim"],
@@ -1069,6 +1304,7 @@ def listar_relacoes_gerais(page_id):
         ]
     })
 @app.route("/api/relations", methods=["POST"])
+@roles_required("admin", "editor")
 def criar_relacao_generica():
     data = request.get_json(silent=True) or {}
 
@@ -1107,6 +1343,7 @@ def criar_relacao_generica():
 
 
 @app.route("/api/relations/<int:relacao_id>", methods=["DELETE"])
+@roles_required("admin", "editor")
 def deletar_relacao(relacao_id):
     conn = get_conn()
     cur = conn.cursor()
@@ -1140,6 +1377,7 @@ def api_listar_posts(page_id):
 
 
 @app.route("/api/pages/<int:page_id>/posts", methods=["POST"])
+@roles_required("admin", "editor")
 def api_criar_post(page_id):
     # Verify page exists
     conn = get_conn()
@@ -1181,6 +1419,7 @@ def api_criar_post(page_id):
 
 
 @app.route("/api/posts/<int:post_id>", methods=["PUT"])
+@roles_required("admin", "editor")
 def api_editar_post(post_id):
     data = request.get_json(silent=True) or {}
     titulo = _to_text_or_none(data.get("titulo"))
@@ -1203,12 +1442,12 @@ def api_editar_post(post_id):
         return jsonify({"ok": True})
     except Exception as e:
         conn.rollback()
-        return jsonify({"erro": "Erro ao editar post", "detalhe": str(e)}), 500
+        return jsonify({"erro": str(e)}), 500
     finally:
         conn.close()
 
-
 @app.route("/api/posts/<int:post_id>", methods=["DELETE"])
+@roles_required("admin", "editor")
 def api_excluir_post(post_id):
     conn = get_conn()
     cur = conn.cursor()
@@ -1229,6 +1468,7 @@ def api_excluir_post(post_id):
 
 
 @app.route("/api/posts/<int:post_id>/reorder", methods=["POST"])
+@roles_required("admin", "editor")
 def api_reordenar_post(post_id):
     data = request.get_json(silent=True) or {}
     direction = (data.get("direction") or "").strip().lower()
@@ -1281,6 +1521,506 @@ def api_reordenar_post(post_id):
     finally:
         conn.close()
 
+@app.route("/api/timeline/<int:tl_id>", methods=["PATCH"])
+@roles_required("admin", "editor")
+def api_patch_timeline_event(tl_id):
+    data = request.get_json(force=True) or {}
+
+    fields = []
+    params = []
+
+    def set_if(key, col):
+        v = data.get(key, None)
+        if v is not None:
+            fields.append(f"{col} = ?")
+            params.append(v)
+
+    set_if("start_text", "start_text")
+    set_if("title", "title")
+    set_if("description", "description")
+    set_if("group_name", "group_name")
+    set_if("color", "color")
+    set_if("sort_order", "sort_order")
+
+    if not fields:
+        return jsonify({"ok": True, "noop": True})
+
+    params.append(tl_id)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"UPDATE timeline_events SET {', '.join(fields)} WHERE id = ?", params)
+    conn.commit()
+    conn.close()
+
+    return jsonify({"ok": True})
+
+# --- CAMPAIGN ARCHIVE ROUTES ---
+
+@app.route("/api/files", methods=["GET"])
+@roles_required("admin", "editor", "viewer")
+def api_listar_arquivos():
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    page_id = request.args.get("page_id")
+    q = request.args.get("q", "").strip()
+    tag = request.args.get("tag", "").strip()
+    file_type = request.args.get("type", "").strip()
+
+    if page_id:
+        query = """
+            SELECT f.* FROM campaign_files f
+            JOIN file_links fl ON f.id = fl.file_id
+            WHERE fl.page_id = ?
+        """
+        params = [page_id]
+        if q:
+            query += " AND f.title LIKE ?"
+            params.append(f"%{q}%")
+    else:
+        query = "SELECT * FROM campaign_files WHERE 1=1"
+        params = []
+        if q:
+            query += " AND (title LIKE ? OR description LIKE ?)"
+            params.extend([f"%{q}%", f"%{q}%"])
+        if tag:
+            query += " AND tags_text LIKE ?"
+            params.append(f"%{tag}%")
+        if file_type:
+            query += " AND file_kind = ?"
+            params.append(file_type)
+
+    # Permission check for private files
+    user = get_current_user()
+    if user["role"] == "viewer":
+        query += " AND is_public = 1"
+
+    query += " ORDER BY created_at DESC"
+    
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/files", methods=["POST"])
+@roles_required("admin", "editor")
+def api_upload_arquivo():
+    if 'file' not in request.files:
+        return jsonify({"erro": "Nenhum arquivo enviado"}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"erro": "Arquivo sem nome"}), 400
+    
+    title = request.form.get("title", file.filename)
+    description = request.form.get("description", "")
+    is_public = 1 if request.form.get("is_public") == "true" else 0
+    tags = request.form.get("tags", "")
+    page_id = request.form.get("page_id") # Optional: link immediately
+
+    filename = secure_filename(file.filename)
+    # create unique name
+    unique_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{filename}"
+    
+    if not os.path.exists(app.config['UPLOAD_FOLDER']):
+        os.makedirs(app.config['UPLOAD_FOLDER'])
+        
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
+    file.save(file_path)
+
+    file_size = os.path.getsize(file_path)
+    mime_type = file.content_type
+    file_kind = 'image' if mime_type and mime_type.startswith('image/') else 'pdf' if mime_type == 'application/pdf' else 'other'
+
+    user = get_current_user()
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO campaign_files (title, description, file_path, file_name, mime_type, file_kind, file_size, is_public, author_username, tags_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (title, description, unique_name, filename, mime_type, file_kind, file_size, is_public, user['username'], tags))
+        file_id = cur.lastrowid
+
+        if page_id:
+            cur.execute("INSERT INTO file_links (file_id, page_id) VALUES (?, ?)", (file_id, page_id))
+        
+        conn.commit()
+        return jsonify({"ok": True, "id": file_id})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"erro": str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route("/api/files/<int:file_id>", methods=["GET"])
+@roles_required("admin", "editor", "viewer")
+def api_detalhe_arquivo(file_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM campaign_files WHERE id = ?", (file_id,))
+    file_row = cur.fetchone()
+    
+    if not file_row:
+        conn.close()
+        return jsonify({"erro": "Arquivo não encontrado"}), 404
+    
+    user = get_current_user()
+    if file_row['is_public'] == 0 and user['role'] == 'viewer':
+        conn.close()
+        return jsonify({"erro": "Acesso negado"}), 403
+    
+    cur.execute("""
+        SELECT p.id, p.titulo, fl.note
+        FROM file_links fl
+        JOIN pages p ON fl.page_id = p.id
+        WHERE fl.file_id = ?
+    """, (file_id,))
+    links = cur.fetchall()
+    conn.close()
+    
+    res = dict(file_row)
+    res['links'] = [dict(l) for l in links]
+    return jsonify(res)
+
+@app.route("/api/files/<int:file_id>", methods=["PATCH"])
+@roles_required("admin", "editor")
+def api_editar_arquivo(file_id):
+    data = request.get_json() or {}
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    fields = []
+    params = []
+    for key in ['title', 'description', 'is_public', 'tags_text']:
+        if key in data:
+            fields.append(f"{key} = ?")
+            params.append(data[key])
+    
+    if not fields:
+        return jsonify({"ok": True, "noop": True})
+    
+    params.append(file_id)
+    try:
+        cur.execute(f"UPDATE campaign_files SET {', '.join(fields)}, updated_at = datetime('now') WHERE id = ?", params)
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"erro": str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route("/api/files/<int:file_id>", methods=["DELETE"])
+@roles_required("admin", "editor")
+def api_deletar_arquivo(file_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT file_path FROM campaign_files WHERE id = ?", (file_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"erro": "Arquivo não encontrado"}), 404
+    
+    try:
+        # Delete physical file
+        path = os.path.join(app.config['UPLOAD_FOLDER'], row['file_path'])
+        if os.path.exists(path):
+            os.remove(path)
+        
+        cur.execute("DELETE FROM campaign_files WHERE id = ?", (file_id,))
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"erro": str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route("/api/files/<int:file_id>/view")
+@roles_required("admin", "editor", "viewer")
+def api_servir_arquivo(file_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT file_path, is_public, mime_type FROM campaign_files WHERE id = ?", (file_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return "Arquivo não encontrado", 404
+    
+    user = get_current_user()
+    if row['is_public'] == 0 and user['role'] == 'viewer':
+        return "Acesso negado", 403
+    
+    return send_from_directory(app.config['UPLOAD_FOLDER'], row['file_path'], mimetype=row['mime_type'])
+
+@app.route("/api/files/<int:file_id>/links", methods=["POST"])
+@roles_required("admin", "editor")
+def api_vincular_arquivo(file_id):
+    data = request.get_json() or {}
+    page_id = data.get("page_id")
+    note = data.get("note", "")
+    
+    if not page_id:
+        return jsonify({"erro": "page_id obrigatório"}), 400
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("INSERT INTO file_links (file_id, page_id, note) VALUES (?, ?, ?)", (file_id, page_id, note))
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"erro": str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route("/api/files/<int:file_id>/links/<int:page_id>", methods=["DELETE"])
+@roles_required("admin", "editor")
+def api_desvincular_arquivo(file_id, page_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM file_links WHERE file_id = ? AND page_id = ?", (file_id, page_id))
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"erro": str(e)}), 500
+    finally:
+        conn.close()
+
+# --- AUTH ROUTES ---
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_login():
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+
+    if not username or not password:
+        return jsonify({"erro": "Usuário e senha são obrigatórios"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, password_hash, role, is_active FROM users WHERE username = ?", (username,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row or row["is_active"] == 0:
+        return jsonify({"erro": "Usuário não encontrado ou inativo"}), 401
+
+    if not check_password_hash(row["password_hash"], password):
+        return jsonify({"erro": "Senha incorreta"}), 401
+
+    # Login sucesso
+    session.permanent = True
+    session["user_id"] = row["id"]
+    
+    # Atualiza last_login
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET last_login = datetime('now') WHERE id = ?", (row["id"],))
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "ok": True,
+        "user": {
+            "id": row["id"],
+            "username": username,
+            "role": row["role"]
+        }
+    })
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_logout():
+    session.pop("user_id", None)
+    return jsonify({"ok": True})
+
+@app.route("/api/auth/me", methods=["GET"])
+def api_me():
+    user = get_current_user()
+    if not user:
+        return jsonify({"user": None})
+    
+    return jsonify({
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "role": user["role"]
+        }
+    })
+
+# --- ADMIN ROUTES (USER MGMT) ---
+
+@app.route("/api/admin/users", methods=["GET"])
+@roles_required("admin")
+def api_admin_list_users():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, username, role, created_at, last_login, is_active FROM users ORDER BY username ASC")
+    rows = cur.fetchall()
+    conn.close()
+    return jsonify({"users": [dict(r) for r in rows]})
+
+@app.route("/api/admin/users", methods=["POST"])
+@roles_required("admin")
+def api_admin_create_user():
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    role = data.get("role") or "viewer"
+
+    if not username or len(password) < 4:
+        return jsonify({"erro": "Username e Senha (mín 4 chars) obrigatórios"}), 400
+
+    if role not in ("admin", "editor", "viewer"):
+        return jsonify({"erro": "Role inválido"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO users (username, password_hash, role)
+            VALUES (?, ?, ?)
+        """, (username, generate_password_hash(password), role))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        return jsonify({"erro": "Username já existe"}), 400
+    finally:
+        conn.close()
+
+    return jsonify({"ok": True})
+
+@app.route("/api/admin/users/<int:user_id>", methods=["PATCH"])
+@roles_required("admin")
+def api_admin_patch_user(user_id):
+    data = request.get_json(silent=True) or {}
+    
+    fields = []
+    params = []
+
+    if "role" in data:
+        if data["role"] in ("admin", "editor", "viewer"):
+            fields.append("role = ?")
+            params.append(data["role"])
+    
+    if "is_active" in data:
+        current_admin = get_current_user()
+        if current_admin and current_admin["id"] == user_id and not data["is_active"]:
+            return jsonify({"erro": "Você não pode desativar sua própria conta de administrador"}), 403
+        fields.append("is_active = ?")
+        params.append(1 if data["is_active"] else 0)
+
+    if "password" in data and len(data["password"]) >= 4:
+        fields.append("password_hash = ?")
+        params.append(generate_password_hash(data["password"]))
+
+    if not fields:
+        return jsonify({"ok": True, "noop": True})
+
+    params.append(user_id)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", params)
+    conn.commit()
+    conn.close()
+
+    return jsonify({"ok": True})
+
+@app.route("/api/admin/timeline/cleanup", methods=["POST"])
+@roles_required("admin")
+def api_timeline_cleanup():
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # Remove events where page_id is NULL or the page no longer exists
+        cur.execute("""
+            DELETE FROM timeline_events
+            WHERE page_id IS NULL
+               OR page_id NOT IN (SELECT id FROM pages)
+        """)
+        conn.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"erro": "Erro no cleanup", "detalhe": str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route("/api/account", methods=["PATCH"])
+def api_patch_account():
+    user = get_current_user()
+    if not user:
+        return jsonify({"erro": "Login necessário"}), 401
+    
+    data = request.get_json(silent=True) or {}
+    new_username = (data.get("username") or "").strip()
+    
+    if "username" in data:
+        if len(new_username) < 3 or len(new_username) > 30:
+            return jsonify({"erro": "Username deve ter entre 3 e 30 caracteres"}), 400
+        
+        # Permitir apenas a-z, A-Z, 0-9, . , _ e -
+        import re
+        if not re.match(r"^[a-zA-Z0-9._-]+$", new_username):
+            return jsonify({"erro": "Username contém caracteres inválidos"}), 400
+            
+        conn = get_conn()
+        cur = conn.cursor()
+        
+        # Verificar se já existe (exceto se for o mesmo user mudando so o case?)
+        cur.execute("SELECT id FROM users WHERE username = ? AND id != ?", (new_username, user["id"]))
+        if cur.fetchone():
+            conn.close()
+            return jsonify({"erro": "Username já está em uso"}), 409
+            
+        cur.execute("UPDATE users SET username = ? WHERE id = ?", (new_username, user["id"]))
+        conn.commit()
+        conn.close()
+        
+    return jsonify({
+        "ok": True, 
+        "user": {
+            "id": user["id"],
+            "username": new_username if "username" in data else user["username"],
+            "role": user["role"]
+        }
+    })
+
+@app.route("/api/account/password", methods=["POST"])
+def api_account_change_password():
+    user = get_current_user()
+    if not user:
+        return jsonify({"erro": "Login necessário"}), 401
+    
+    data = request.get_json(silent=True) or {}
+    current_password = data.get("current_password")
+    new_password = data.get("new_password")
+    
+    if not current_password or not new_password or len(new_password) < 4:
+        return jsonify({"erro": "Senha atual e nova senha (mín 4 chars) são obrigatórias"}), 400
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT password_hash FROM users WHERE id = ?", (user["id"],))
+    row = cur.fetchone()
+    
+    if not row or not check_password_hash(row["password_hash"], current_password):
+        conn.close()
+        return jsonify({"erro": "Senha atual incorreta"}), 401
+    
+    cur.execute("UPDATE users SET password_hash = ? WHERE id = ?", (generate_password_hash(new_password), user["id"]))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({"ok": True})
+
 @app.route("/<path:path>")
 def spa_fallback(path):
     # bloqueia QUALQUER chamada de API que por algum motivo caiu aqui
@@ -1296,6 +2036,8 @@ def spa_fallback(path):
 
 criar_tabelas(reset= False)
 run_migrations()
+ensure_admin_user()
+ensure_timeline_sort_order()
 
 
 if __name__ == "__main__":

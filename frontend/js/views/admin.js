@@ -1,5 +1,6 @@
 import { api } from "../api.js";
 import { navigate } from "../app.js";
+import { state } from "../state.js";
 import { SCHEMAS } from "../schemas.js";
 
 function renderCamposCriacao(entidade) {
@@ -41,6 +42,11 @@ function renderCamposCriacao(entidade) {
 }
 
 export function renderAdmin(root) {
+  if (!state.canWrite()) {
+    alert("Acesso negado. Você não tem permissão para criar entidades.");
+    return navigate("/");
+  }
+
   root.innerHTML = `
     <button id="voltar" class="btn-ghost" style="margin-bottom:12px; font-weight:bold;">← Voltar</button>
     <div style="max-width:600px; margin:0 auto; padding-bottom:40px;">

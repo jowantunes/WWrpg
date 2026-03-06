@@ -8,8 +8,10 @@
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Inter:wght@400;500;600&display=swap"
     rel="stylesheet">
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="css/timeline.css" />
   <script src="https://unpkg.com/lucide@latest"></script>
 </head>
+
 
 <body>
   <div id="layout-wrapper">
@@ -39,18 +41,29 @@
           <span class="icon"><i data-lucide="shell"></i></span><span class="label">Criaturas</span>
         </a>
         <a href="/categorias/item" data-link class="nav-item">
-          <span class="icon"><i data-lucide="backpack"></i></span><span class="label">Itens</span>
+          <span class="icon"><i data-lucide="Backpack"></i></span><span class="label">Itens</span>
+        </a>
+        <a href="/timeline" data-link class="nav-item">
+          <span class="icon"><i data-lucide="list"></i></span><span class="label">Timeline</span>
+        </a>
+        <a href="/files" data-link class="nav-item">
+          <span class="icon"><i data-lucide="folder-open"></i></span><span class="label">Arquivos</span>
         </a>
         <div class="sidebar-divider"></div>
-        <a href="/admin" data-link class="nav-item danger-hover">
+        <a href="/admin" data-link class="nav-item danger-hover" id="nav-new-entity">
           <span class="icon" style="color:var(--brand-accent);"><i data-lucide="plus"></i></span><span
             class="label">Nova Entidade</span>
         </a>
+        <div id="auth-status-container"
+          style="margin-top:auto; padding: 1rem; border-top: 1px solid var(--border-color);">
+          <!-- Injetado via app.js -->
+        </div>
       </nav>
     </aside>
 
     <main id="main-content">
       <div id="app"></div>
+      <div style="padding-bottom: 200px;"></div>
     </main>
   </div>
   <script>

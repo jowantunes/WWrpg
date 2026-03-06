@@ -48,10 +48,28 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  deletarRelacao: (relacaoId) =>
-    jsonFetch(`/api/relations/${relacaoId}`, {
-      method: "DELETE",
-    }),
+  deletarRelacao: (id) => jsonFetch(`/api/relations/${id}`, { method: "DELETE" }),
+
+  // Campaign Archive
+  listarArquivos: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return jsonFetch(`/api/files?${qs}`);
+  },
+  uploadArquivo: (formData) => {
+    // Note: formData should be used with fetch directly since it handles headers automatically
+    return fetch("/api/files", {
+      method: "POST",
+      body: formData
+    }).then(res => res.json());
+  },
+  getDetalheArquivo: (id) => jsonFetch(`/api/files/${id}`),
+  editarArquivo: (id, data) => jsonFetch(`/api/files/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  deletarArquivo: (id) => jsonFetch(`/api/files/${id}`, { method: "DELETE" }),
+  vincularArquivo: (fileId, pageId, note = "") => jsonFetch(`/api/files/${fileId}/links`, {
+    method: "POST",
+    body: JSON.stringify({ page_id: pageId, note })
+  }),
+  desvincularArquivo: (fileId, pageId) => jsonFetch(`/api/files/${fileId}/links/${pageId}`, { method: "DELETE" }),
 
   // Busca genérica (autocomplete)
   buscarPages: ({ entidade, q }) => {
@@ -85,4 +103,38 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ direction }),
     }),
+
+  listarTimeline: (params = {}) => {
+    const searchParams = new URLSearchParams();
+    if (params.start) searchParams.append("start", params.start);
+    if (params.end) searchParams.append("end", params.end);
+    if (params.group) searchParams.append("group", params.group);
+    return jsonFetch(`/api/timeline?${searchParams.toString()}`);
+  },
+
+  patchTimelineEvent: (id, payload) =>
+    jsonFetch(`/api/timeline/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  // AUTH
+  login: (username, password) =>
+    jsonFetch("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  logout: () => jsonFetch("/api/auth/logout", { method: "POST" }),
+  getMe: () => jsonFetch("/api/auth/me"),
+
+  // ADMIN
+  listUsers: () => jsonFetch("/api/admin/users"),
+  createUser: (payload) =>
+    jsonFetch("/api/admin/users", { method: "POST", body: JSON.stringify(payload) }),
+  patchUser: (id, payload) =>
+    jsonFetch(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  changeMyPassword: (payload) =>
+    jsonFetch("/api/account/password", { method: "POST", body: JSON.stringify(payload) }),
+  patchAccount: (payload) =>
+    jsonFetch("/api/account", { method: "PATCH", body: JSON.stringify(payload) }),
 };
