@@ -52,10 +52,88 @@ export async function renderAdminUsers(root) {
         </table>
       </div>
     </div>
+
+    <div class="admin-users-container" style="padding: 0 20px 20px 20px;">
+      <h2 class="title-paranormal">Atividade Recente</h2>
+      <div class="dark-surface" style="padding: 20px; border-radius: var(--radius-lg); overflow-x: auto;">
+        <table style="width: 100%; border-collapse: collapse; color: var(--text-primary); font-size: 14px;">
+          <thead>
+            <tr style="text-align: left; border-bottom: 1px solid var(--bg-surface-alt); color: var(--text-muted);">
+              <th style="padding: 12px;">Data</th>
+              <th style="padding: 12px;">Usuário</th>
+              <th style="padding: 12px;">Ação</th>
+              <th style="padding: 12px;">Entidade</th>
+              <th style="padding: 12px;">Tipo</th>
+            </tr>
+          </thead>
+          <tbody id="activity-log-tbody">
+            <tr><td colspan="5" style="padding: 20px; text-align: center;">Carregando atividade...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   `;
 
   const tbody = root.querySelector("#users-tbody");
+  const activityTbody = root.querySelector("#activity-log-tbody");
   const createForm = root.querySelector("#create-user-form");
+
+  function formatTimestamp(ts) {
+    if (!ts) return "";
+    // ts is usually "YYYY-MM-DD HH:MM:SS" from SQLite
+    try {
+      const parts = ts.split(/[- :]/);
+      // parts: [YYYY, MM, DD, HH, MM, SS]
+      if (parts.length < 5) return ts;
+      return `${parts[2]}/${parts[1]}/${parts[0]} ${parts[3]}:${parts[4]}`;
+    } catch (e) {
+      return ts;
+    }
+  }
+
+  function getActionBadge(action) {
+    let color = "var(--text-muted)";
+    let label = action;
+
+    if (action === "created") {
+      color = "#28a745"; // verde
+      label = "criou";
+    } else if (action === "updated") {
+      color = "#007bff"; // azul
+      label = "editou";
+    } else if (action === "deleted") {
+      color = "#dc3545"; // vermelho
+      label = "excluiu";
+    }
+
+    return `<span style="color: ${color}; font-weight: 600; text-transform: uppercase; font-size: 11px;">${label}</span>`;
+  }
+
+  async function loadActivityLog() {
+    try {
+      const { logs } = await api.getActivityLog();
+      if (!logs || logs.length === 0) {
+        activityTbody.innerHTML = `<tr><td colspan="5" style="padding: 20px; text-align: center; color: var(--text-muted);">Nenhuma atividade registrada.</td></tr>`;
+        return;
+      }
+
+      activityTbody.innerHTML = logs.map(log => `
+        <tr style="border-bottom: 1px solid var(--bg-surface-alt);">
+          <td style="padding: 12px; white-space: nowrap; color: var(--text-muted); font-family: monospace;">
+            ${formatTimestamp(log.timestamp)}
+          </td>
+          <td style="padding: 12px; font-weight: 600;">@${log.username}</td>
+          <td style="padding: 12px;">${getActionBadge(log.action)}</td>
+          <td style="padding: 12px;">${log.entity_title}</td>
+          <td style="padding: 12px;">
+            <span class="entity-type-badge type-${log.entity_type}">${log.entity_type}</span>
+          </td>
+        </tr>
+      `).join("");
+    } catch (err) {
+      activityTbody.innerHTML = `<tr><td colspan="5" style="padding: 20px; color: var(--brand-danger); text-align: center;">Erro: ${err.message}</td></tr>`;
+    }
+  }
 
   async function loadUsers() {
     try {
@@ -151,4 +229,5 @@ export async function renderAdminUsers(root) {
   };
 
   loadUsers();
+  loadActivityLog();
 }

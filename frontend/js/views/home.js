@@ -30,7 +30,7 @@ const HERO_SLIDES = [
     subtitle: "Liga entidades e cria relações tipadas.",
     ctaText: "Abrir Conexões",
     onClick: () => navigate("/categorias/organizacao"),
-    bgImage: "/frontend/uploads/hero_conexoes_grafo.png"
+    bgImage: "/frontend/uploads/baannerbel.png"
   }
 ];
 

@@ -129,6 +129,7 @@ export const api = {
 
   // ADMIN
   listUsers: () => jsonFetch("/api/admin/users"),
+  getActivityLog: () => jsonFetch("/api/activity-log"),
   createUser: (payload) =>
     jsonFetch("/api/admin/users", { method: "POST", body: JSON.stringify(payload) }),
   patchUser: (id, payload) =>

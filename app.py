@@ -308,6 +308,22 @@ def run_migrations():
         CREATE INDEX IF NOT EXISTS idx_file_links_file ON file_links(file_id);
         CREATE INDEX IF NOT EXISTS idx_file_links_page ON file_links(page_id);
     """)
+
+    # Migration: activity_log table
+    cursor.executescript("""
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            action TEXT,
+            entity_id INTEGER,
+            entity_title TEXT,
+            entity_type TEXT,
+            timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_log(timestamp);
+    """)
+    conn.commit()
     conn.close()
 
 def ensure_timeline_sort_order():
@@ -386,6 +402,19 @@ def _get_id_from_request(data):
         return int(raw)
     except (TypeError, ValueError):
         return None
+
+def log_activity(cur, action, entity_id, entity_title, entity_type, user=None):
+    """Insere um registro no log de atividades."""
+    if not user:
+        user = get_current_user()
+    if not user:
+        return
+    
+    cur.execute("""
+        INSERT INTO activity_log (user_id, username, action, entity_id, entity_title, entity_type)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (user["id"], user["username"], action, entity_id, entity_title, entity_type))
+
 def _merge_payload(data: dict) -> dict:
     """
     Suporta:
@@ -400,159 +429,7 @@ def _merge_payload(data: dict) -> dict:
         merged["tags"] = data["tags"]
     return merged
 
-@app.route("/api/paginass", methods=["POST"])
-def api_criar_pagina():
-    data = request.get_json(silent=True) or {}
 
-    titulo = (data.get("titulo") or "").strip()
-    entidade = (data.get("entidade") or "").strip().lower()
-
-    if not titulo:
-        return jsonify({"erro": "Campo obrigatório: titulo"}), 400
-
-    entidades_validas = {"personagem", "local", "organizacao", "criatura", "evento", "item"}
-    if entidade not in entidades_validas:
-        return jsonify({"erro": f"Entidade inválida. Use: {sorted(entidades_validas)}"}), 400
-
-    autor = _to_text_or_none(data.get("autor"))
-    imagem = _to_text_or_none(data.get("imagem"))
-    notas = data.get("notas")
-    if notas is not None:
-        notas = str(notas)
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    try:
-        # 1) base
-        cur.execute(
-            """
-            INSERT INTO pages (titulo, entidade, autor, imagem, notas)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (titulo, entidade, autor, imagem, notas),
-        )
-        page_id = cur.lastrowid
-
-        # 2) específico (usa `tipo` como subtipo)
-        subtipo = _to_text_or_none(data.get("tipo"))
-
-        if entidade == "personagem":
-            cur.execute(
-                """
-                INSERT INTO personagens (page_id, tipo, idade, genero, status_vida, aparencia, descricao, aniversario)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    page_id,
-                    subtipo,
-                    _to_int_or_none(data.get("idade")),
-                    _to_text_or_none(data.get("genero")),
-                    _normalize_status(data.get("status_vida"), {"vivo","morto","desconhecido"}, default="vivo"),
-                    _to_text_or_none(data.get("aparencia")),
-                    _to_text_or_none(data.get("descricao")),
-                    _to_text_or_none(data.get("aniversario")),
-                ),
-            )
-
-        elif entidade == "local":
-            cur.execute(
-                """
-                INSERT INTO locais (page_id, tipo, descricao, status_local)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    page_id,
-                    subtipo,
-                    _to_text_or_none(data.get("descricao")),
-                    _normalize_status(data.get("status_local"), {"ativo","destruido","abandonado","desconhecido"}, default="ativo"),
-                ),
-            )
-
-        elif entidade == "organizacao":
-            cur.execute(
-                """
-                INSERT INTO organizacoes (page_id, tipo, descricao, status_org)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    page_id,
-                    subtipo,
-                    _to_text_or_none(data.get("descricao")),
-                    _normalize_status(data.get("status_org"), {"ativa","extinta","desconhecida"}, default="ativa"),
-                ),
-            )
-
-        elif entidade == "criatura":
-            cur.execute(
-                """
-                INSERT INTO criaturas (page_id, tipo, elemento, descricao, status)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    page_id,
-                    subtipo,
-                    _to_text_or_none(data.get("elemento")),
-                    _to_text_or_none(data.get("descricao")),
-                    _normalize_status(data.get("status"), {"viva","morta","extinta","desconhecida"}, default="viva"),
-                ),
-            )
-
-        elif entidade == "evento":
-            cur.execute(
-                """
-                INSERT INTO eventos (page_id, tipo, descricao, data_inicio, data_fim)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    page_id,
-                    subtipo,
-                    _to_text_or_none(data.get("descricao")),
-                    _to_text_or_none(data.get("data_inicio") or data.get("data")),
-                    _to_text_or_none(data.get("data_fim")),
-                ),
-            )
-
-        elif entidade == "item":
-            cur.execute(
-                """
-                INSERT INTO itens (page_id, tipo, descricao)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    page_id,
-                    subtipo,
-                    _to_text_or_none(data.get("descricao")),
-                ),
-            )
-
-        # 3) tags (opcional): ["a","b"] no mesmo nível
-        tags = data.get("tags")
-        if isinstance(tags, list):
-            for t in [str(x).strip() for x in tags]:
-                if not t:
-                    continue
-                cur.execute("INSERT OR IGNORE INTO tags (nome) VALUES (?)", (t,))
-                cur.execute("SELECT id FROM tags WHERE nome = ?", (t,))
-                row = cur.fetchone()
-                if row:
-                    tag_id = row[0]
-                    cur.execute(
-                        "INSERT OR IGNORE INTO page_tags (page_id, tag_id) VALUES (?, ?)",
-                        (page_id, tag_id),
-                    )
-
-        conn.commit()
-        return jsonify({"ok": True, "id": page_id}), 201
-
-    except sqlite3.IntegrityError as e:
-        conn.rollback()
-        return jsonify({"erro": "Falha de integridade no banco", "detalhe": str(e)}), 400
-    except Exception as e:
-        conn.rollback()
-        return jsonify({"erro": "Erro interno", "detalhe": str(e)}), 500
-    finally:
-        conn.close()
 # ----------------------
 # Rotas básicas
 # ----------------------
@@ -1003,6 +880,9 @@ def api_criar_pagina_universal():
                         (page_id, tag_row[0]),
                     )
 
+        # LOG
+        log_activity(cur, 'created', page_id, titulo, entidade, user=user)
+
         conn.commit()
         return jsonify({"ok": True, "id": page_id}), 201
 
@@ -1018,8 +898,7 @@ def api_criar_pagina_universal():
 @app.route("/api/editar_paginas", methods=["POST"])
 @roles_required("admin", "editor")
 def api_editar_pagina():
-    print(">>> ENTROU NO api_editar_pagina")
-
+    user = get_current_user()
     data = request.get_json(silent=True) or {}
     data = _merge_payload(data)
 
@@ -1183,6 +1062,9 @@ def api_editar_pagina():
                         (pid, tag_row[0]),
                     )
 
+        # LOG
+        log_activity(cur, 'updated', pid, titulo, entidade, user=user)
+
         conn.commit()
         return jsonify({"ok": True})
 
@@ -1202,6 +1084,7 @@ def api_editar_pagina():
 @app.route("/api/excluir_paginas", methods=["POST"])
 @roles_required("admin", "editor")
 def api_excluir_pagina():
+    user = get_current_user()
     data = request.get_json(silent=True) or {}
     pagina_id = _get_id_from_request(data)
 
@@ -1213,10 +1096,18 @@ def api_excluir_pagina():
     conn = get_conn()
     cur = conn.cursor()
     try:
+        # Get info for log before deleting
+        cur.execute("SELECT titulo, entidade FROM pages WHERE id = ?", (pagina_id,))
+        p_info = cur.fetchone()
+        
         # Cascade manual for timeline (since FK is SET NULL but we want DELETE)
         cur.execute("DELETE FROM timeline_events WHERE page_id = ?", (pagina_id,))
         
         cur.execute("DELETE FROM pages WHERE id = ?", (pagina_id,))
+        
+        if p_info:
+            log_activity(cur, 'deleted', pagina_id, p_info["titulo"], p_info["entidade"], user=user)
+
         conn.commit()
         return jsonify({"ok": True})
     except Exception as e:
@@ -1867,6 +1758,20 @@ def api_admin_list_users():
     rows = cur.fetchall()
     conn.close()
     return jsonify({"users": [dict(r) for r in rows]})
+
+@app.route("/api/activity-log", methods=["GET"])
+@roles_required("admin")
+def api_get_activity_log():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM activity_log 
+        ORDER BY timestamp DESC 
+        LIMIT 50
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return jsonify({"logs": [dict(r) for r in rows]})
 
 @app.route("/api/admin/users", methods=["POST"])
 @roles_required("admin")
